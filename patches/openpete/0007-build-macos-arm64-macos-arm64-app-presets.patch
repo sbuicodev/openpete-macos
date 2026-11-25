@@ -1,0 +1,88 @@
+From f38ff0a10d8a4ccb34817ebb1c2201a530f4d3ad Mon Sep 17 00:00:00 2001
+From: Stefano Buico <stefano.buico@gmail.com>
+Date: Wed, 25 Nov 2026 21:12:01 +0100
+Subject: [PATCH 7/7] build: macos-arm64 / macos-arm64-app presets
+
+---
+ CMakePresets.json                   | 43 ++++++++++++++++++++++++-----
+ cmake/presets/macos-universal.cmake |  5 ----
+ 2 files changed, 36 insertions(+), 12 deletions(-)
+ delete mode 100644 cmake/presets/macos-universal.cmake
+
+diff --git a/CMakePresets.json b/CMakePresets.json
+index 94cc38d7..b1b5d306 100644
+--- a/CMakePresets.json
++++ b/CMakePresets.json
+@@ -47,13 +47,36 @@
+       }
+     },
+     {
+-      "name": "macos-universal",
+-      "displayName": "macOS universal (placeholder; not validated this phase)",
++      "name": "macos-arm64",
++      "displayName": "macOS Apple Silicon (Metal via MoltenVK)",
+       "generator": "Ninja",
+-      "binaryDir": "${sourceDir}/build/macos-universal",
++      "binaryDir": "${sourceDir}/build/macos",
+       "cacheVariables": {
+-        "CMAKE_PROJECT_openpete_INCLUDE": "${sourceDir}/cmake/presets/macos-universal.cmake",
+-        "CMAKE_OSX_ARCHITECTURES": "x86_64;arm64"
++        "CMAKE_PROJECT_openpete_INCLUDE": "${sourceDir}/cmake/presets/macos-arm64.cmake",
++        "CMAKE_OSX_ARCHITECTURES": "arm64",
++        "CMAKE_BUILD_TYPE": "RelWithDebInfo",
++        "CMAKE_C_FLAGS": "-fwrapv -fno-strict-aliasing",
++        "CMAKE_CXX_FLAGS": "-fwrapv -fno-strict-aliasing",
++        "OPENPETE_GAMES": "spyro-1",
++        "OPENPETE_BUILD_TESTS": "OFF",
++        "OPENPETE_ENABLE_RECORD": "OFF",
++        "OPENPETE_BUILD_PCSX_REDUX_GTE": "OFF",
++        "OPENPETE_COMPILE_MODS": "OFF",
++        "OPENPETE_STAGE_MOD_DLLS": "OFF",
++        "OPENAL_INCLUDE_DIR": "/opt/homebrew/opt/openal-soft/include",
++        "OPENAL_LIBRARY": "/opt/homebrew/opt/openal-soft/lib/libopenal.dylib"
++      }
++    },
++    {
++      "name": "macos-arm64-app",
++      "displayName": "macOS Apple Silicon .app (no game code; first-launch recompile)",
++      "inherits": "macos-arm64",
++      "binaryDir": "${sourceDir}/build/macos-app",
++      "cacheVariables": {
++        "CMAKE_PROJECT_openpete_INCLUDE": "${sourceDir}/cmake/presets/macos-arm64-app.cmake",
++        "OPENPETE_RECOMP_LINKAGE": "shared",
++        "OPENPETE_ROM_FREE_ICON": "ON",
++        "OPENPETE_HIDE_DEBUG_FLAGS": "ON"
+       }
+     },
+     {
+@@ -103,8 +126,14 @@
+       "configurePreset": "windows-msvc"
+     },
+     {
+-      "name": "macos-universal",
+-      "configurePreset": "macos-universal"
++      "name": "macos-arm64",
++      "configurePreset": "macos-arm64",
++      "targets": ["openpete-spyro1"]
++    },
++    {
++      "name": "macos-arm64-app",
++      "configurePreset": "macos-arm64-app",
++      "targets": ["openpete-spyro1"]
+     },
+     {
+       "name": "wasm",
+diff --git a/cmake/presets/macos-universal.cmake b/cmake/presets/macos-universal.cmake
+deleted file mode 100644
+index f46cbe9b..00000000
+--- a/cmake/presets/macos-universal.cmake
++++ /dev/null
+@@ -1,5 +0,0 @@
+-# macos-universal: placeholder (not validated). CMAKE_OSX_ARCHITECTURES
+-# stays in CMakePresets.json — it must be set BEFORE project() runs the
+-# compiler checks, and this file is included at the end of project().
+-include(${CMAKE_CURRENT_LIST_DIR}/_helpers.cmake)
+-set(CMAKE_BUILD_TYPE RelWithDebInfo)
+-- 
+2.54.0 (Apple Git-157)
+

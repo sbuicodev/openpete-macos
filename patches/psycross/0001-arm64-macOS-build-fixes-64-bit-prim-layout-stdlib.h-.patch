@@ -1,0 +1,70 @@
+From 834e34cb6081ce30f2c3e2733a7dec9eb998665a Mon Sep 17 00:00:00 2001
+From: Stefano Buico <stefano.buico@gmail.com>
+Date: Wed, 25 Nov 2026 21:12:08 +0100
+Subject: [PATCH] arm64 macOS build fixes: 64-bit prim layout, stdlib.h,
+ half-float cast
+
+---
+ include/psx/libgpu.h       | 2 +-
+ src/gte/half_float.cpp     | 2 +-
+ src/psx/LIBCD.C            | 4 ++++
+ src/render/PsyX_render.cpp | 1 +
+ 4 files changed, 7 insertions(+), 2 deletions(-)
+
+diff --git a/include/psx/libgpu.h b/include/psx/libgpu.h
+index 879fa85..d858fd7 100644
+--- a/include/psx/libgpu.h
++++ b/include/psx/libgpu.h
+@@ -329,7 +329,7 @@ typedef struct _RECT16 {
+ 
+ #if USE_EXTENDED_PRIM_POINTERS
+ 
+-#if defined(_M_X64) || defined(__amd64__)
++#if defined(_M_X64) || defined(__amd64__) || defined(__aarch64__)
+ 
+ #define DECLARE_P_ADDR \
+ 		uintptr_t addr; \
+diff --git a/src/gte/half_float.cpp b/src/gte/half_float.cpp
+index c92194e..56847c5 100644
+--- a/src/gte/half_float.cpp
++++ b/src/gte/half_float.cpp
+@@ -55,7 +55,7 @@ short to_half_float(const float x)
+ 
+ float from_half_float(const short x)
+ {
+-	FP16 h = { x };
++	FP16 h = { (unsigned short)x };
+ 
+ 	static const FP32 magic = { 113 << 23 };
+ 	static const uint shifted_exp = 0x7c00 << 13; // exponent mask after shift
+diff --git a/src/psx/LIBCD.C b/src/psx/LIBCD.C
+index 624b527..dd0f594 100644
+--- a/src/psx/LIBCD.C
++++ b/src/psx/LIBCD.C
+@@ -8,7 +8,11 @@
+ #include <string.h>
+ #include <stdlib.h>
+ #include <ctype.h>
++#ifdef __APPLE__
++#include <stdlib.h>
++#else
+ #include <malloc.h>
++#endif
+ 
+ #ifdef _WIN32
+ #include <direct.h>
+diff --git a/src/render/PsyX_render.cpp b/src/render/PsyX_render.cpp
+index c88767d..67f6fb7 100644
+--- a/src/render/PsyX_render.cpp
++++ b/src/render/PsyX_render.cpp
+@@ -8,6 +8,7 @@
+ #include "PsyX/util/timer.h"
+ 
+ #include <assert.h>
++#include <stdlib.h>
+ #include <math.h>
+ #include <string.h>
+ 
+-- 
+2.54.0 (Apple Git-157)
+

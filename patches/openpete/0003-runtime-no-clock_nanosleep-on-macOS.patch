@@ -1,0 +1,25 @@
+From 204cc6ae8c51fe315a3fb7b3d8883c6b23bceab9 Mon Sep 17 00:00:00 2001
+From: Stefano Buico <stefano.buico@gmail.com>
+Date: Wed, 25 Nov 2026 21:12:01 +0100
+Subject: [PATCH 3/7] runtime: no clock_nanosleep on macOS
+
+---
+ core/runtime/openpete_time.c | 2 +-
+ 1 file changed, 1 insertion(+), 1 deletion(-)
+
+diff --git a/core/runtime/openpete_time.c b/core/runtime/openpete_time.c
+index d2155768..5131f651 100644
+--- a/core/runtime/openpete_time.c
++++ b/core/runtime/openpete_time.c
+@@ -272,7 +272,7 @@ static void sleep_until_posix(op_time_t deadline_ns) {
+     struct timespec ts;
+     ts.tv_sec  = (time_t)(deadline_ns / OP_NS_PER_SEC);
+     ts.tv_nsec = (long)(deadline_ns % OP_NS_PER_SEC);
+-#  if defined(CLOCK_MONOTONIC)
++#  if defined(CLOCK_MONOTONIC) && !defined(__APPLE__)
+     /* TIMER_ABSTIME: target an absolute deadline. Restart on EINTR. */
+     int rc;
+     do {
+-- 
+2.54.0 (Apple Git-157)
+

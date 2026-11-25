@@ -1,0 +1,118 @@
+From 035304fbfeff092568620ee0a8acd0d9b08ed005 Mon Sep 17 00:00:00 2001
+From: Stefano Buico <stefano.buico@gmail.com>
+Date: Wed, 25 Nov 2026 21:12:01 +0100
+Subject: [PATCH 1/7] psxrecomp: rename colliding BasicBlock (ODR crash on
+ macOS)
+
+---
+ .../psxrecomp/recompiler/include/basic_block.h     | 12 ++++++------
+ .../psxrecomp/recompiler/src/basic_block.cpp       | 14 +++++++-------
+ 2 files changed, 13 insertions(+), 13 deletions(-)
+
+diff --git a/third_party/psxrecomp/recompiler/include/basic_block.h b/third_party/psxrecomp/recompiler/include/basic_block.h
+index 0630ca2d..d3d94ec9 100644
+--- a/third_party/psxrecomp/recompiler/include/basic_block.h
++++ b/third_party/psxrecomp/recompiler/include/basic_block.h
+@@ -13,7 +13,7 @@ namespace PSXRecomp {
+ //   - A single exit point (the last instruction, which is a branch/jump or end-of-code)
+ //   - No branches/jumps except at the end
+ // MIPS delay slots: the instruction after a branch/jump is part of the same block.
+-struct BasicBlock {
++struct LinearBasicBlock {
+     uint32_t start_addr;          // Address of first instruction
+     uint32_t end_addr;            // Address of last instruction (inclusive)
+     uint32_t instr_count;         // Total instructions including delay slot
+@@ -36,15 +36,15 @@ public:
+ 
+     // Find all basic blocks in the executable.
+     // Returns blocks sorted by start_addr.
+-    std::vector<BasicBlock> analyze();
++    std::vector<LinearBasicBlock> analyze();
+ 
+     // After analyze(), find the block containing addr.
+     // Returns nullptr if not found.
+-    const BasicBlock* find_block(uint32_t addr) const;
++    const LinearBasicBlock* find_block(uint32_t addr) const;
+ 
+     // Build predecessor lists for all blocks.
+     // Call this after analyze() to populate block.predecessors.
+-    static void build_predecessors(std::vector<BasicBlock>& blocks);
++    static void build_predecessors(std::vector<LinearBasicBlock>& blocks);
+ 
+ private:
+     const PS1Executable& exe_;
+@@ -56,7 +56,7 @@ private:
+     std::unordered_map<uint32_t, size_t> addr_to_idx_;
+ 
+     // Resulting blocks (populated by analyze())
+-    std::vector<BasicBlock> blocks_;
++    std::vector<LinearBasicBlock> blocks_;
+ 
+     // Map from start_addr → block index (for find_block)
+     std::unordered_map<uint32_t, size_t> addr_to_block_;
+@@ -69,7 +69,7 @@ private:
+     std::vector<uint32_t> find_leaders();
+ 
+     // Build a single block starting at start_addr.
+-    BasicBlock build_block(uint32_t start_addr);
++    LinearBasicBlock build_block(uint32_t start_addr);
+ };
+ 
+ } // namespace PSXRecomp
+diff --git a/third_party/psxrecomp/recompiler/src/basic_block.cpp b/third_party/psxrecomp/recompiler/src/basic_block.cpp
+index 310f5dd8..5d6f20df 100644
+--- a/third_party/psxrecomp/recompiler/src/basic_block.cpp
++++ b/third_party/psxrecomp/recompiler/src/basic_block.cpp
+@@ -49,10 +49,10 @@ std::vector<uint32_t> BasicBlockAnalyzer::find_leaders() {
+ }
+ 
+ // ---------------------------------------------------------------------------
+-// build_block: construct a BasicBlock starting at start_addr
++// build_block: construct a LinearBasicBlock starting at start_addr
+ // ---------------------------------------------------------------------------
+-BasicBlock BasicBlockAnalyzer::build_block(uint32_t start_addr) {
+-    BasicBlock block{};
++LinearBasicBlock BasicBlockAnalyzer::build_block(uint32_t start_addr) {
++    LinearBasicBlock block{};
+     block.start_addr    = start_addr;
+     block.end_addr      = start_addr;
+     block.instr_count   = 0;
+@@ -156,7 +156,7 @@ BasicBlock BasicBlockAnalyzer::build_block(uint32_t start_addr) {
+ // ---------------------------------------------------------------------------
+ // analyze: main entry point
+ // ---------------------------------------------------------------------------
+-std::vector<BasicBlock> BasicBlockAnalyzer::analyze() {
++std::vector<LinearBasicBlock> BasicBlockAnalyzer::analyze() {
+     blocks_.clear();
+     addr_to_block_.clear();
+     decoded_.clear();
+@@ -185,7 +185,7 @@ std::vector<BasicBlock> BasicBlockAnalyzer::analyze() {
+         // Only create a block if start_addr is in the decoded range
+         if (addr_to_idx_.count(start) == 0) continue;
+ 
+-        BasicBlock block{};
++        LinearBasicBlock block{};
+         block.start_addr  = start;
+         block.end_addr    = start;
+         block.instr_count = 0;
+@@ -307,7 +307,7 @@ std::vector<BasicBlock> BasicBlockAnalyzer::analyze() {
+ // ---------------------------------------------------------------------------
+ // build_predecessors: reverse the successor edges
+ // ---------------------------------------------------------------------------
+-void BasicBlockAnalyzer::build_predecessors(std::vector<BasicBlock>& blocks) {
++void BasicBlockAnalyzer::build_predecessors(std::vector<LinearBasicBlock>& blocks) {
+     // Build addr → block index map
+     std::unordered_map<uint32_t, size_t> addr_map;
+     for (size_t i = 0; i < blocks.size(); ++i) {
+@@ -328,7 +328,7 @@ void BasicBlockAnalyzer::build_predecessors(std::vector<BasicBlock>& blocks) {
+ // ---------------------------------------------------------------------------
+ // find_block: look up a block containing addr
+ // ---------------------------------------------------------------------------
+-const BasicBlock* BasicBlockAnalyzer::find_block(uint32_t addr) const {
++const LinearBasicBlock* BasicBlockAnalyzer::find_block(uint32_t addr) const {
+     // First check if addr is an exact start address
+     auto it = addr_to_block_.find(addr);
+     if (it != addr_to_block_.end()) {
+-- 
+2.54.0 (Apple Git-157)
+

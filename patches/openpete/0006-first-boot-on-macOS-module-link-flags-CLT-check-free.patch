@@ -1,0 +1,138 @@
+From d073ae16ffa7200a8f593459d21bdc9779b4a024 Mon Sep 17 00:00:00 2001
+From: Stefano Buico <stefano.buico@gmail.com>
+Date: Wed, 25 Nov 2026 21:12:01 +0100
+Subject: [PATCH 6/7] first boot on macOS: module link flags, CLT check,
+ freecam via dispatcher
+
+---
+ cmake/openpete_game.cmake           |  6 +++-
+ games/spyro-1/dist/recomp_build.cpp | 48 ++++++++++++++++++++---------
+ games/spyro-1/features/freecam.c    |  6 ++--
+ 3 files changed, 42 insertions(+), 18 deletions(-)
+
+diff --git a/cmake/openpete_game.cmake b/cmake/openpete_game.cmake
+index 3d356603..a2daf5f4 100644
+--- a/cmake/openpete_game.cmake
++++ b/cmake/openpete_game.cmake
+@@ -133,7 +133,11 @@ function(openpete_add_game GAME_ID)
+             # this CMake-built .so/.dll is a dev artifact and gets no LTO
+             # even when the preset turns IPO on globally.
+             INTERPROCEDURAL_OPTIMIZATION OFF)
+-        if(NOT WIN32)
++        if(APPLE)
++            # Mach-O binds module-internal references internally already;
++            # host imports resolve at dlopen against the exe's exports.
++            target_link_options(${_module} PRIVATE -Wl,-undefined,dynamic_lookup)
++        elseif(NOT WIN32)
+             # Bind module-internal references internally, matching PE
+             # semantics (no cross-image preemption), and leave the
+             # module->host imports to resolve at dlopen against the exe's
+diff --git a/games/spyro-1/dist/recomp_build.cpp b/games/spyro-1/dist/recomp_build.cpp
+index 9ab5128d..beb1a0f9 100644
+--- a/games/spyro-1/dist/recomp_build.cpp
++++ b/games/spyro-1/dist/recomp_build.cpp
+@@ -16,6 +16,7 @@
+ // (recomp/tools/llvm-mingw) and links against the staged exe-export
+ // implib (recomp/tools/libopenpete-exe-exports.a).
+ #include "openpete_log.h"
++#include "openpete_paths.h"
+ #include "sha256.h"
+ 
+ #include <cstdint>
+@@ -67,21 +68,14 @@ struct Overlay {
+ };
+ 
+ std::string exe_dir() {
+-#ifdef _WIN32
+-    char exe[4096];
+-    DWORD len = GetModuleFileNameA(NULL, exe, sizeof exe);
+-    if (len > 0 && len < sizeof exe) {
+-        for (char* p = exe; *p; ++p) if (*p == '\\') *p = '/';
+-        if (char* slash = strrchr(exe, '/')) { *slash = 0; return exe; }
+-    }
+-#else
+-    char exe[PATH_MAX];
+-    ssize_t len = readlink("/proc/self/exe", exe, sizeof exe - 1);
+-    if (len > 0) {
+-        exe[len] = 0;
+-        if (char* slash = strrchr(exe, '/')) { *slash = 0; return exe; }
++    /* Install directory with the shipped data (Contents/Resources in a
++     * macOS .app); see openpete_paths.h. */
++    char dir[4096];
++    if (openpete_exe_dir(dir, sizeof dir) == 0) {
++        std::string s = dir;
++        for (auto& ch : s) if (ch == '\\') ch = '/';
++        return s;
+     }
+-#endif
+     return ".";
+ }
+ 
+@@ -468,6 +462,21 @@ extern "C" int spyro1_recomp_build_module(const char* disc_path,
+             "exe (or $OPENPETE_CC)\n");
+         return -1;
+     }
++#if defined(__APPLE__)
++    /* `cc` is the Command Line Tools shim on macOS. Without the tools it
++     * fails every call; ask macOS to offer the install (its own dialog) and
++     * stop with a message the user can act on. */
++    if (cc == "cc" && std::system("/usr/bin/xcrun --find clang >/dev/null 2>&1") != 0) {
++        std::system("/usr/bin/xcode-select --install >/dev/null 2>&1");
++        OPL_ERROR_F("recomp-build", "%s",
++                    "Apple's Command Line Tools are needed once to build the "
++                    "game from your disc. Accept the install dialog, then "
++                    "launch OpenPete again.");
++        std::fprintf(stderr, "openpete: install Apple's Command Line Tools "
++                             "(xcode-select --install), then launch again\n");
++        return -1;
++    }
++#endif
+ 
+     if (!fs::exists(man / "manifest.toml") || !fs::exists(src / "psx_runtime.h") ||
+         !fs::exists(src / "psx_runtime_internal.h")) {
+@@ -701,8 +710,17 @@ extern "C" int spyro1_recomp_build_module(const char* disc_path,
+         std::ostringstream c;
+         c << q << cc << q << " -shared -o " << q << out_module_path << q
+           << " @" << q << rsp.string() << q;
+-#ifndef _WIN32
++#if defined(__APPLE__)
++        /* Mach-O: a dylib binds its own symbols internally (two-level
++         * namespace, no -Bsymbolic needed) and leaves the host imports to
++         * dyld at dlopen. `-shared` is clang's spelling of -dynamiclib.
++         * ld64 refuses a dylib without libSystem, so the no-libc link below
++         * is ELF-only; the Command Line Tools always ship the SDK. */
++        c << " -arch arm64 -Wl,-undefined,dynamic_lookup";
++#elif !defined(_WIN32)
+         c << " -Wl,-Bsymbolic-functions -Wl,--unresolved-symbols=ignore-all";
++#endif
++#if !defined(_WIN32) && !defined(__APPLE__)
+         /* The translated MIPS is pure integer code: it calls nothing from
+          * the C library, defines no constructors and needs no crt frames,
+          * so the module links with no libc and no DT_NEEDED at all. That
+diff --git a/games/spyro-1/features/freecam.c b/games/spyro-1/features/freecam.c
+index 300328e7..24f7c8e6 100644
+--- a/games/spyro-1/features/freecam.c
++++ b/games/spyro-1/features/freecam.c
+@@ -98,7 +98,9 @@ static int spyro1_player_placeable(CPUState* cpu) {
+  * then func_80034358 applies the preset and snaps m_Position to the offset
+  * from the focus. Without it the follow converges from wherever the camera
+  * stood, a sweep of a hundred-plus ticks across the level. */
+-extern void func_80034358(CPUState* cpu);
++/* Through the dispatcher: in a shared-linkage build the translated function
++ * lives in the recomp module, not the exe. */
++void call_by_address(CPUState* cpu, uint32_t addr); /* psx_runtime.h */
+ static void spyro1_place_camera(CPUState* cpu) {
+     for (uint32_t o = 0; o < 0x18u; o += 4u)
+         cpu->write_word(ADDR_CAM_PRESET_PLACED + o, cpu->read_word(ADDR_CAM_PRESET_DEFAULT + o));
+@@ -108,7 +110,7 @@ static void spyro1_place_camera(CPUState* cpu) {
+     cpu->write_word(ADDR_CAM_PRESET_PLACED + 8u, 1536u);     /* m_Coords.radius */
+     cpu->write_word(G_CAMERA + 0xD8u, ADDR_CAM_PRESET_PLACED); /* m_SphericalPreset */
+     cpu->write_word(G_CAMERA + 0xD4u, cpu->read_word(G_SPYRO + 0x11Cu)); /* m_FocusRotation */
+-    func_80034358(cpu);
++    call_by_address(cpu, 0x80034358u);
+ }
+ 
+ /* "topdown": the whole-level overhead pose; "sweepN": corner N of a
+-- 
+2.54.0 (Apple Git-157)
+

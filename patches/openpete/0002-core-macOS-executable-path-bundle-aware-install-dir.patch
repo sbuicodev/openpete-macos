@@ -1,0 +1,211 @@
+From bc4d76021814b1e32c4f87491c148ef6c5fe7fc2 Mon Sep 17 00:00:00 2001
+From: Stefano Buico <stefano.buico@gmail.com>
+Date: Wed, 25 Nov 2026 21:12:01 +0100
+Subject: [PATCH 2/7] core: macOS executable path; bundle-aware install dir
+
+---
+ core/config/paths.c                  | 34 +++++++++++++++++++++++++++-
+ core/include/openpete_paths.h        |  4 ++++
+ core/mods/handoff.c                  |  8 +++++--
+ games/spyro-1/dist/disc_library.cpp  | 22 ++++++------------
+ games/spyro-1/recomp_attach_shared.c | 17 +++++---------
+ 5 files changed, 56 insertions(+), 29 deletions(-)
+
+diff --git a/core/config/paths.c b/core/config/paths.c
+index 891e4b65..509e5f7b 100644
+--- a/core/config/paths.c
++++ b/core/config/paths.c
+@@ -19,6 +19,9 @@
+   #define OPP_PORTABLE_DEFAULT 1
+ #else
+   #include <unistd.h>
++  #if defined(__APPLE__)
++    #include <mach-o/dyld.h>   /* _NSGetExecutablePath */
++  #endif
+   #define OPP_MKDIR(p) mkdir((p), 0755)
+   #define OPP_SEP '/'
+   #define OPP_STAT stat
+@@ -33,20 +36,35 @@ static int s_pref = -1;
+ /* Memoized openpete_paths_portable(): -1 = not yet resolved. */
+ static int s_resolved = -1;
+ 
++static int dir_exists(const char* p);
++
+ /* ------------------------------------------------------------------ */
+ /* primitives                                                          */
+ /* ------------------------------------------------------------------ */
+ 
+-int openpete_exe_dir(char* out, size_t cap) {
++int openpete_exe_path(char* out, size_t cap) {
+     char buf[OPP_PATH_MAX];
+ #ifdef _WIN32
+     DWORD n = GetModuleFileNameA(NULL, buf, (DWORD)sizeof buf);
+     if (n == 0 || n >= sizeof buf) return -1;
++#elif defined(__APPLE__)
++    char raw[OPP_PATH_MAX];
++    uint32_t rawcap = (uint32_t)sizeof raw;
++    if (_NSGetExecutablePath(raw, &rawcap) != 0) return -1;
++    if (!realpath(raw, buf)) return -1;
+ #else
+     ssize_t n = readlink("/proc/self/exe", buf, sizeof buf - 1);
+     if (n <= 0) return -1;
+     buf[n] = '\0';
+ #endif
++    if (strlen(buf) >= cap) return -1;
++    snprintf(out, cap, "%s", buf);
++    return 0;
++}
++
++int openpete_exe_dir(char* out, size_t cap) {
++    char buf[OPP_PATH_MAX];
++    if (openpete_exe_path(buf, sizeof buf) != 0) return -1;
+     char* slash = strrchr(buf, '/');
+ #ifdef _WIN32
+     char* back = strrchr(buf, '\\');
+@@ -54,6 +72,20 @@ int openpete_exe_dir(char* out, size_t cap) {
+ #endif
+     if (!slash) return -1;
+     *slash = '\0';
++#if defined(__APPLE__)
++    /* Inside an .app the executable sits in Contents/MacOS while the shipped
++     * read-only data (recomp kit, assets, controller database) lives in
++     * Contents/Resources: the install directory every caller means. */
++    {
++        static const char suffix[] = "/Contents/MacOS";
++        size_t bl = strlen(buf), sl = sizeof suffix - 1;
++        if (bl > sl && strcmp(buf + bl - sl, suffix) == 0) {
++            char res[OPP_PATH_MAX];
++            snprintf(res, sizeof res, "%.*s/Contents/Resources", (int)(bl - sl), buf);
++            if (dir_exists(res)) snprintf(buf, sizeof buf, "%s", res);
++        }
++    }
++#endif
+     if (strlen(buf) >= cap) return -1;
+     snprintf(out, cap, "%s", buf);
+     return 0;
+diff --git a/core/include/openpete_paths.h b/core/include/openpete_paths.h
+index a874e269..f34bd442 100644
+--- a/core/include/openpete_paths.h
++++ b/core/include/openpete_paths.h
+@@ -40,7 +40,11 @@
+ extern "C" {
+ #endif
+ 
++/* Absolute path of the running executable (symlinks resolved). 0 on success. */
++int openpete_exe_path(char* out, size_t cap);
++
+ /* Directory containing the running executable, no trailing separator.
++ * Inside a macOS .app it is Contents/Resources, where the shipped data lives.
+  * Returns 0 on success, -1 if it cannot be determined. */
+ int openpete_exe_dir(char* out, size_t cap);
+ 
+diff --git a/core/mods/handoff.c b/core/mods/handoff.c
+index 19d0827d..80d52751 100644
+--- a/core/mods/handoff.c
++++ b/core/mods/handoff.c
+@@ -23,6 +23,7 @@
+ #include "openpete_handoff.h"
+ 
+ #include "openpete_log.h"
++#include "openpete_paths.h"
+ #include "openpete_state.h"
+ #include "openpete_fiber.h" /* openpete_frame */
+ 
+@@ -104,7 +105,7 @@ void openpete_handoff_poll(CPUState* cpu) {
+     }
+ 
+     /* Rebuild argv: original minus any prior --resume-handoff pair,
+-     * plus ours. Exec via /proc/self/exe so argv[0] needs no PATH. */
++     * plus ours. Exec via the resolved executable path so argv[0] needs no PATH. */
+     char** nv = (char**)calloc((size_t)s_argc + 3, sizeof(char*));
+     if (!nv) return;
+     int n = 0;
+@@ -130,7 +131,10 @@ void openpete_handoff_poll(CPUState* cpu) {
+      * no reader and wedge as soon as it filled. It opens its own mirror
+      * on the way up, carrying this run over to openpete.log.1. */
+     openpete_log_file_close();
+-    execv("/proc/self/exe", nv);
++    {
++        char self[4096];
++        if (openpete_exe_path(self, sizeof self) == 0) execv(self, nv);
++    }
+     /* Only reached on failure — never brick the session. */
+     OPL_ERROR_F("handoff", "execv failed: continuing without handoff");
+     free(nv);
+diff --git a/games/spyro-1/dist/disc_library.cpp b/games/spyro-1/dist/disc_library.cpp
+index 5bee272a..1d2e1b7c 100644
+--- a/games/spyro-1/dist/disc_library.cpp
++++ b/games/spyro-1/dist/disc_library.cpp
+@@ -62,23 +62,15 @@ constexpr const char* kRetailSha =
+     "fc866b2a02e010a6658f8af2de28bb3001eb33513e5924af014e35643c6dee37";
+ 
+ std::string exe_dir() {
+-#ifdef _WIN32
+-    char exe[4096];
+-    DWORD len = GetModuleFileNameA(NULL, exe, sizeof exe);
+-    if (len > 0 && len < sizeof exe) {
+-        for (char* p = exe; *p; ++p) if (*p == '\\') *p = '/';
+-        if (char* slash = strrchr(exe, '/')) { *slash = 0; return exe; }
++    /* Install directory with the shipped data (Contents/Resources in a
++     * macOS .app); see openpete_paths.h. */
++    char dir[4096];
++    if (openpete_exe_dir(dir, sizeof dir) == 0) {
++        std::string s = dir;
++        for (auto& ch : s) if (ch == '\\') ch = '/';
++        return s;
+     }
+     return ".";
+-#else
+-    char exe[PATH_MAX];
+-    ssize_t len = readlink("/proc/self/exe", exe, sizeof exe - 1);
+-    if (len > 0) {
+-        exe[len] = 0;
+-        if (char* slash = strrchr(exe, '/')) { *slash = 0; return exe; }
+-    }
+-    return ".";
+-#endif
+ }
+ 
+ /* Named, not created. Readers tolerate an absent library (nothing ingested
+diff --git a/games/spyro-1/recomp_attach_shared.c b/games/spyro-1/recomp_attach_shared.c
+index 4bf4727d..042dab31 100644
+--- a/games/spyro-1/recomp_attach_shared.c
++++ b/games/spyro-1/recomp_attach_shared.c
+@@ -20,6 +20,7 @@
+ // an undefined symbol — add the symbol here (it is exported by the
+ // module automatically; nothing else to update).
+ #include "recomp_attach.h"
++#include "openpete_paths.h"
+ #include "openpete_recomp_module.h"
+ #include "spyro_overlay_table.h"
+ #include "openpete_log.h"
+@@ -90,21 +91,15 @@ static void* need(const char* name) {
+ 
+ /* Default: MODULE_DEFAULT_NAME next to the executable. LoadLibraryA
+  * already searches the application directory; ELF dlopen does not, so
+- * build the path from /proc/self/exe. */
++ * build the path from the executable directory. */
+ static void default_module_path(char* buf, size_t n) {
+ #ifdef _WIN32
+     snprintf(buf, n, "%s", MODULE_DEFAULT_NAME);
+ #else
+-    char exe[PATH_MAX];
+-    ssize_t len = readlink("/proc/self/exe", exe, sizeof exe - 1);
+-    if (len > 0) {
+-        exe[len] = 0;
+-        char* slash = strrchr(exe, '/');
+-        if (slash) {
+-            *slash = 0;
+-            snprintf(buf, n, "%s/%s", exe, MODULE_DEFAULT_NAME);
+-            return;
+-        }
++    char dir[PATH_MAX];
++    if (openpete_exe_dir(dir, sizeof dir) == 0) {
++        snprintf(buf, n, "%s/%s", dir, MODULE_DEFAULT_NAME);
++        return;
+     }
+     snprintf(buf, n, "%s", MODULE_DEFAULT_NAME);
+ #endif
+-- 
+2.54.0 (Apple Git-157)
+

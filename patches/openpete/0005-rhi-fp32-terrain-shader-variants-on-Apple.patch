@@ -1,0 +1,99 @@
+From acf1d55305ef608aa58c770e8bbee83da9e6ba5b Mon Sep 17 00:00:00 2001
+From: Stefano Buico <stefano.buico@gmail.com>
+Date: Wed, 25 Nov 2026 21:12:01 +0100
+Subject: [PATCH 5/7] rhi: fp32 terrain shader variants on Apple
+
+---
+ core/rhi/CMakeLists.txt | 56 ++++++++++++++++++++++++++++++++++-------
+ 1 file changed, 47 insertions(+), 9 deletions(-)
+
+diff --git a/core/rhi/CMakeLists.txt b/core/rhi/CMakeLists.txt
+index c559f04e..3e1cfbfa 100644
+--- a/core/rhi/CMakeLists.txt
++++ b/core/rhi/CMakeLists.txt
+@@ -26,13 +26,51 @@ set(RHI_SHADERS quad.vert quad.frag quad_key.frag psx_sample.vert psx_scene.vert
+ set(RHI_SHADER_INCLUDES ${RHI_SHADER_SRC_DIR}/psx_key_contest.glsl
+                         ${RHI_SHADER_SRC_DIR}/terrain_shade.glsl)
+ set(RHI_SHADER_SPV "")
++# macOS: Metal has no fp64, so MoltenVK cannot translate the terrain stages
++# (`double` math + dvec uniforms). tools/macos/fp32_shader.py derives fp32
++# variants that read the doubles' raw bits from the unchanged uniform layout
++# (offsets pinned from the original SPIR-V), so the CPU side is untouched.
++set(RHI_TERRAIN_SRC_DIR ${RHI_SHADER_SRC_DIR})
++set(RHI_TERRAIN_DEPS "")
++if(APPLE)
++    find_program(SPIRV_DIS spirv-dis REQUIRED)
++    find_package(Python3 REQUIRED COMPONENTS Interpreter)
++    set(RHI_TERRAIN_SRC_DIR ${CMAKE_CURRENT_BINARY_DIR}/shaders_fp32)
++    file(MAKE_DIRECTORY ${RHI_TERRAIN_SRC_DIR})
++    set(_fp32 ${CMAKE_SOURCE_DIR}/tools/macos/fp32_shader.py)
++    add_custom_command(
++        OUTPUT ${RHI_TERRAIN_SRC_DIR}/terrain.vert
++               ${RHI_TERRAIN_SRC_DIR}/terrain_shade.glsl
++               ${RHI_TERRAIN_SRC_DIR}/terrain.frag
++        COMMAND ${Python3_EXECUTABLE} ${_fp32}
++                ${RHI_SHADER_SRC_DIR}/terrain.vert ${RHI_TERRAIN_SRC_DIR}/terrain.vert
++                --block TerrainGlobals --compile-src ${RHI_SHADER_SRC_DIR}/terrain.vert
++                --include-dir ${RHI_SHADER_SRC_DIR}
++        COMMAND ${Python3_EXECUTABLE} ${_fp32}
++                ${RHI_SHADER_SRC_DIR}/terrain_shade.glsl ${RHI_TERRAIN_SRC_DIR}/terrain_shade.glsl
++                --block TerrainGlobals --compile-src ${RHI_SHADER_SRC_DIR}/terrain.frag
++                --include-dir ${RHI_SHADER_SRC_DIR}
++        COMMAND ${CMAKE_COMMAND} -E copy ${RHI_SHADER_SRC_DIR}/terrain.frag
++                ${RHI_TERRAIN_SRC_DIR}/terrain.frag
++        DEPENDS ${_fp32} ${RHI_SHADER_SRC_DIR}/terrain.vert
++                ${RHI_SHADER_SRC_DIR}/terrain.frag ${RHI_SHADER_INCLUDES}
++        COMMENT "fp32_shader: Metal-compatible terrain stages"
++        VERBATIM)
++    set(RHI_TERRAIN_DEPS ${RHI_TERRAIN_SRC_DIR}/terrain.vert
++                         ${RHI_TERRAIN_SRC_DIR}/terrain_shade.glsl
++                         ${RHI_TERRAIN_SRC_DIR}/terrain.frag)
++endif()
+ foreach(s IN LISTS RHI_SHADERS)
++    set(_src_dir ${RHI_SHADER_SRC_DIR})
++    if(s STREQUAL "terrain.vert" OR s STREQUAL "terrain.frag")
++        set(_src_dir ${RHI_TERRAIN_SRC_DIR})
++    endif()
+     add_custom_command(
+         OUTPUT ${RHI_SHADER_OUT_DIR}/${s}.spv
+-        COMMAND ${GLSLANG_VALIDATOR} -V -I${RHI_SHADER_SRC_DIR}
+-                ${RHI_SHADER_SRC_DIR}/${s}
++        COMMAND ${GLSLANG_VALIDATOR} -V -I${_src_dir} -I${RHI_SHADER_SRC_DIR}
++                ${_src_dir}/${s}
+                 -o ${RHI_SHADER_OUT_DIR}/${s}.spv
+-        DEPENDS ${RHI_SHADER_SRC_DIR}/${s} ${RHI_SHADER_INCLUDES}
++        DEPENDS ${_src_dir}/${s} ${RHI_SHADER_INCLUDES} ${RHI_TERRAIN_DEPS}
+         COMMENT "glslangValidator ${s} -> ${s}.spv"
+         VERBATIM)
+     list(APPEND RHI_SHADER_SPV ${RHI_SHADER_OUT_DIR}/${s}.spv)
+@@ -41,10 +79,10 @@ endforeach()
+ # path (second vertex binding = previous-tick positions/corners).
+ add_custom_command(
+     OUTPUT ${RHI_SHADER_OUT_DIR}/terrain_anim.vert.spv
+-    COMMAND ${GLSLANG_VALIDATOR} -V -I${RHI_SHADER_SRC_DIR} --define-macro TERRAIN_ANIM=1
+-            ${RHI_SHADER_SRC_DIR}/terrain.vert
++    COMMAND ${GLSLANG_VALIDATOR} -V -I${RHI_TERRAIN_SRC_DIR} -I${RHI_SHADER_SRC_DIR} --define-macro TERRAIN_ANIM=1
++            ${RHI_TERRAIN_SRC_DIR}/terrain.vert
+             -o ${RHI_SHADER_OUT_DIR}/terrain_anim.vert.spv
+-    DEPENDS ${RHI_SHADER_SRC_DIR}/terrain.vert ${RHI_SHADER_INCLUDES}
++    DEPENDS ${RHI_TERRAIN_SRC_DIR}/terrain.vert ${RHI_SHADER_INCLUDES} ${RHI_TERRAIN_DEPS}
+     COMMENT "glslangValidator terrain.vert (TERRAIN_ANIM) -> terrain_anim.vert.spv"
+     VERBATIM)
+ list(APPEND RHI_SHADER_SPV ${RHI_SHADER_OUT_DIR}/terrain_anim.vert.spv)
+@@ -52,10 +90,10 @@ list(APPEND RHI_SHADER_SPV ${RHI_SHADER_OUT_DIR}/terrain_anim.vert.spv)
+ # (second vertex binding = the emitted triangle's other two members).
+ add_custom_command(
+     OUTPUT ${RHI_SHADER_OUT_DIR}/terrain_near.vert.spv
+-    COMMAND ${GLSLANG_VALIDATOR} -V -I${RHI_SHADER_SRC_DIR} --define-macro TERRAIN_NEAR=1
+-            ${RHI_SHADER_SRC_DIR}/terrain.vert
++    COMMAND ${GLSLANG_VALIDATOR} -V -I${RHI_TERRAIN_SRC_DIR} -I${RHI_SHADER_SRC_DIR} --define-macro TERRAIN_NEAR=1
++            ${RHI_TERRAIN_SRC_DIR}/terrain.vert
+             -o ${RHI_SHADER_OUT_DIR}/terrain_near.vert.spv
+-    DEPENDS ${RHI_SHADER_SRC_DIR}/terrain.vert ${RHI_SHADER_INCLUDES}
++    DEPENDS ${RHI_TERRAIN_SRC_DIR}/terrain.vert ${RHI_SHADER_INCLUDES} ${RHI_TERRAIN_DEPS}
+     COMMENT "glslangValidator terrain.vert (TERRAIN_NEAR) -> terrain_near.vert.spv"
+     VERBATIM)
+ list(APPEND RHI_SHADER_SPV ${RHI_SHADER_OUT_DIR}/terrain_near.vert.spv)
+-- 
+2.54.0 (Apple Git-157)
+

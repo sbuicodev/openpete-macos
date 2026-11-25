@@ -1,0 +1,178 @@
+From c7b4bab563e89a161bee3937d1247c105bfb6cdf Mon Sep 17 00:00:00 2001
+From: Stefano Buico <stefano.buico@gmail.com>
+Date: Wed, 25 Nov 2026 21:12:01 +0100
+Subject: [PATCH 4/7] rhi: load MoltenVK directly, enable portability subset;
+ fp64 gate lifted on Apple
+
+---
+ core/renderer/native_render.c |  7 +++-
+ core/rhi/rhi.h                |  7 ++++
+ core/rhi/rhi_vulkan.c         | 75 +++++++++++++++++++++++++++++++----
+ 3 files changed, 81 insertions(+), 8 deletions(-)
+
+diff --git a/core/renderer/native_render.c b/core/renderer/native_render.c
+index a61b6fc4..3c12c66f 100644
+--- a/core/renderer/native_render.c
++++ b/core/renderer/native_render.c
+@@ -2387,6 +2387,7 @@ static int s_background_requested;
+ static SDL_WindowFlags nr_window_flags(const openpete_options_t *opts)
+ {
+     SDL_WindowFlags f = SDL_WINDOW_VULKAN | SDL_WINDOW_RESIZABLE;
++    rhi_prepare_vulkan_library();   /* macOS: SDL must load MoltenVK, not a loader */
+     if (opts->background > 0) {
+         SDL_SetHint(SDL_HINT_WINDOW_ACTIVATE_WHEN_SHOWN, "0");
+         SDL_SetHint(SDL_HINT_WINDOW_ACTIVATE_WHEN_RAISED, "0");
+@@ -3742,8 +3743,12 @@ int openpete_native_tercache_usable(void)
+         && !tag_split_dev()
+         && !scene_box_armed()
+         /* fp64 in terrain.vert is what makes the mirror bit-exact vs the
+-         * CPU walk's double math — no fp64, no retained path. */
++         * CPU walk's double math — no fp64, no retained path. macOS builds
++         * ship fp32 terrain stages (tools/macos/fp32_shader.py; Metal has no
++         * fp64): close to the CPU walk but not bit-exact, accepted there. */
++#if !defined(__APPLE__)
+         && rhi_device_has_float64(s_nr.dev)
++#endif
+         && (s_force || !rhi_device_is_software(s_nr.dev));
+ }
+ 
+diff --git a/core/rhi/rhi.h b/core/rhi/rhi.h
+index 6715b463..49cb3250 100644
+--- a/core/rhi/rhi.h
++++ b/core/rhi/rhi.h
+@@ -34,6 +34,13 @@ struct SDL_Window;
+ 
+ typedef struct rhi_device rhi_device;
+ 
++/* macOS: the Vulkan implementation is MoltenVK (Vulkan on Metal), loaded
++ * directly with no Vulkan loader. Resolves it once (OPENPETE_MOLTENVK, then
++ * beside the app, then Homebrew) and points SDL at it; call before creating
++ * an SDL_WINDOW_VULKAN window. Returns the path, or NULL if none was found.
++ * Elsewhere a no-op returning NULL. */
++const char *rhi_prepare_vulkan_library(void);
++
+ /* Create the device against an SDL window created with SDL_WINDOW_VULKAN.
+  * `vsync` selects the swapchain present mode: 1 = force FIFO (vsync ON, present
+  * locked to the monitor refresh), 0 = force a vsync-OFF mode (immediate, else
+diff --git a/core/rhi/rhi_vulkan.c b/core/rhi/rhi_vulkan.c
+index fcc3e691..cc07e3f6 100644
+--- a/core/rhi/rhi_vulkan.c
++++ b/core/rhi/rhi_vulkan.c
+@@ -30,6 +30,56 @@
+ #include "rhi_gpu_audit.h" /* must follow volk.h: redirects the vk* globals */
+ #include "rhi_memtype.h"
+ 
++#if defined(__APPLE__)
++#include <dlfcn.h>
++
++static void *g_mvk_module;
++static const char *g_mvk_path;
++
++/** @brief Resolve and dlopen MoltenVK once; point SDL at the same dylib. */
++const char *rhi_prepare_vulkan_library(void)
++{
++    if (g_mvk_module) return g_mvk_path;
++    const char *candidates[] = {
++        getenv("OPENPETE_MOLTENVK"),
++        "@executable_path/../Frameworks/libMoltenVK.dylib", /* .app bundle */
++        "@executable_path/libMoltenVK.dylib",
++        "/opt/homebrew/lib/libMoltenVK.dylib",
++    };
++    for (size_t i = 0; i < sizeof candidates / sizeof candidates[0]; i++) {
++        const char *p = candidates[i];
++        if (!p || !*p) continue;
++        void *m = dlopen(p, RTLD_NOW | RTLD_LOCAL);
++        if (m) {
++            g_mvk_module = m;
++            g_mvk_path = p;
++            SDL_SetHint(SDL_HINT_VULKAN_LIBRARY, p);
++            return p;
++        }
++    }
++    return NULL;
++}
++
++/** @brief volk bring-up straight on MoltenVK: no loader, no portability enumeration. */
++static VkResult rhi_volk_init(void)
++{
++    if (!rhi_prepare_vulkan_library()) {
++        fprintf(stderr, "[rhi/vk] MoltenVK not found (set OPENPETE_MOLTENVK or brew install molten-vk)\n");
++        return VK_ERROR_INITIALIZATION_FAILED;
++    }
++    PFN_vkGetInstanceProcAddr gipa =
++        (PFN_vkGetInstanceProcAddr)dlsym(g_mvk_module, "vkGetInstanceProcAddr");
++    if (!gipa) return VK_ERROR_INITIALIZATION_FAILED;
++    volkInitializeCustom(gipa);
++    return VK_SUCCESS;
++}
++#else
++/** @brief Non-Apple hosts keep the platform Vulkan loader. */
++const char *rhi_prepare_vulkan_library(void) { return NULL; }
++/** @brief Load the platform Vulkan loader through volk. */
++static VkResult rhi_volk_init(void) { return volkInitialize(); }
++#endif
++
+ /* Acquire budget, and the back-off after one expires.
+  *
+  * The budget has TWO bounds and the original only had the upper one. It must
+@@ -793,11 +843,14 @@ static bool pick_physical_and_device(rhi_device *dev)
+     if (dev_avail)
+         vkEnumerateDeviceExtensionProperties(dev->phys, NULL, &dev_ext_n, dev_avail);
+     bool have_present_id = false, have_present_wait = false;
++    bool have_portability_subset = false;
+     for (uint32_t i = 0; i < dev_ext_n && dev_avail; i++) {
+         if (strcmp(dev_avail[i].extensionName, "VK_KHR_present_id") == 0)
+             have_present_id = true;
+         else if (strcmp(dev_avail[i].extensionName, "VK_KHR_present_wait") == 0)
+             have_present_wait = true;
++        else if (strcmp(dev_avail[i].extensionName, "VK_KHR_portability_subset") == 0)
++            have_portability_subset = true; /* MoltenVK: must be enabled when offered */
+     }
+     free(dev_avail);
+ 
+@@ -831,8 +884,16 @@ static bool pick_physical_and_device(rhi_device *dev)
+                 ? "ENABLED (costs pacing; measurement runs only)" : "off");
+     dev->has_present_timing = pt_want && !dev->headless &&
+                               have_present_id && have_present_wait;
+-    const char *dev_ext[] = { VK_KHR_SWAPCHAIN_EXTENSION_NAME,
+-                              "VK_KHR_present_id", "VK_KHR_present_wait" };
++    const char *dev_ext[4];
++    uint32_t dev_ext_count = 0;
++    if (!dev->headless) {
++        dev_ext[dev_ext_count++] = VK_KHR_SWAPCHAIN_EXTENSION_NAME;
++        if (dev->has_present_timing) {
++            dev_ext[dev_ext_count++] = "VK_KHR_present_id";
++            dev_ext[dev_ext_count++] = "VK_KHR_present_wait";
++        }
++    }
++    if (have_portability_subset) dev_ext[dev_ext_count++] = "VK_KHR_portability_subset";
+     VkPhysicalDevicePresentWaitFeaturesKHR feat_wait = {
+         .sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_PRESENT_WAIT_FEATURES_KHR,
+         .presentWait = VK_TRUE,
+@@ -848,9 +909,8 @@ static bool pick_physical_and_device(rhi_device *dev)
+         .queueCreateInfoCount = 1,
+         .pQueueCreateInfos = &qci,
+         /* No swapchain extension when there's no surface to present to. */
+-        .enabledExtensionCount = dev->headless ? 0u
+-                                 : (dev->has_present_timing ? 3u : 1u),
+-        .ppEnabledExtensionNames = dev->headless ? NULL : dev_ext,
++        .enabledExtensionCount = dev_ext_count,
++        .ppEnabledExtensionNames = dev_ext_count ? dev_ext : NULL,
+         .pEnabledFeatures = &enable,
+     };
+     VkResult r = vkCreateDevice(dev->phys, &dci, NULL, &dev->device);
+@@ -1937,8 +1997,9 @@ static rhi_device *rhi_create_impl(struct SDL_Window *window, const char *app_na
+     dev->vsync_pref = vsync;   /* consulted by choose_present_mode (windowed only) */
+ 
+     /* Dynamically load the Vulkan loader (libvulkan.so.1 / vulkan-1.dll);
+-     * no loader import library is linked on any platform. */
+-    if (volkInitialize() != VK_SUCCESS) {
++     * no loader import library is linked on any platform. On macOS this is
++     * MoltenVK itself (see rhi_prepare_vulkan_library). */
++    if (rhi_volk_init() != VK_SUCCESS) {
+         RHI_LOG("volkInitialize failed — no Vulkan loader found\n");
+         free(dev);
+         return NULL;
+-- 
+2.54.0 (Apple Git-157)
+
