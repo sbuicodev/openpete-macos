@@ -43,8 +43,15 @@ say "Submodules (PsyCross from the public archive)"
 git -C "$W" submodule init third_party/PsyCross
 git -C "$W" config submodule.third_party/PsyCross.url "$PSYCROSS_URL"
 git -C "$W" submodule update third_party/PsyCross
+# This commit names the decomp by an SSH URL, which needs GitHub SSH keys;
+# HTTPS works for everyone. Its own nested submodule (the maspsx compiler
+# wrapper) is only for building the decomp, which the disc-carved build skips.
+git -C "$W" submodule init games/spyro-1/spyro-1
+git -C "$W" config submodule.games/spyro-1/spyro-1.url \
+    "https://github.com/TheMobyCollective/spyro-1.git"
+git -C "$W" submodule update games/spyro-1/spyro-1
 git -C "$W" submodule update --init --recursive -- \
-    third_party/SDL third_party/glslang third_party/imgui games/spyro-1/spyro-1
+    third_party/SDL third_party/glslang third_party/imgui
 
 # git am records a committer; supply one only if the user has none configured.
 ID=()

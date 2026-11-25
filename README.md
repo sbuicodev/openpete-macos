@@ -20,7 +20,7 @@ No PSYQ SDK, Docker or MIPS toolchain is needed.
 ## Build and play
 
 ```bash
-git clone --recursive https://github.com/<you>/openpete-macos.git
+git clone --recursive https://github.com/sbuicodev/openpete-macos.git
 cd openpete-macos
 ./build.sh "/path/to/Spyro the Dragon (USA).cue"
 ```
