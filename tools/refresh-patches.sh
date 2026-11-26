@@ -16,7 +16,7 @@ git -C "$W/third_party/PsyCross" format-patch --quiet --zero-commit --no-numbere
     -o "$ROOT/patches/psycross"
 
 # Overlay files are new files, not patches: copy each one back.
-(cd "$ROOT/overlay" && find . -type f) | while IFS= read -r f; do
+(cd "$ROOT/overlay" && find . -type f ! -name .DS_Store) | while IFS= read -r f; do
     cp "$W/$f" "$ROOT/overlay/$f"
 done
 

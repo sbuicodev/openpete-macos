@@ -1,0 +1,42 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: Stefano Buico <stefano.buico@gmail.com>
+Date: Thu, 26 Nov 2026 02:53:18 +0100
+Subject: [PATCH] fix(devui): keep the ini out of the macOS app bundle
+
+Inside an .app SDL_GetBasePath() is Contents/Resources; writing
+openpete-devui.ini there broke the bundle's code signature. Use the
+per-user config dir instead.
+---
+ core/ui/devui.cpp | 9 +++++++++
+ 1 file changed, 9 insertions(+)
+
+diff --git a/core/ui/devui.cpp b/core/ui/devui.cpp
+index faadb875..a9c6f0b7 100644
+--- a/core/ui/devui.cpp
++++ b/core/ui/devui.cpp
+@@ -44,6 +44,7 @@ extern "C" {
+ #include "openpete_menu.h"
+ #include "openpete_mods.h"
+ #include "openpete_mod_ui.h"
++#include "openpete_paths.h"
+ 
+ #include <stdarg.h>
+ #include <stdio.h>
+@@ -112,6 +113,14 @@ int openpete_devui_init(struct rhi_device *dev, struct SDL_Window *win,
+     /* UI state (window pos/collapse) next to the exe, not the CWD. */
+     const char *base = SDL_GetBasePath();
+     snprintf(s_ini_path, sizeof s_ini_path, "%sopenpete-devui.ini", base ? base : "");
++#ifdef __APPLE__
++    /* Inside an .app the base path is Contents/Resources: writing there
++     * breaks the bundle's code signature, so use the per-user config dir. */
++    char cfg[960];
++    if (base && strstr(base, ".app/Contents/")
++        && openpete_paths_user_config_dir(cfg, sizeof cfg, 1) == 0)
++        snprintf(s_ini_path, sizeof s_ini_path, "%s/openpete-devui.ini", cfg);
++#endif
+     io.IniFilename = s_ini_path;
+     ImGui::StyleColorsDark();
+     ImGui::GetStyle().Alpha = 0.96f;
+-- 
+2.54.0 (Apple Git-157)
+

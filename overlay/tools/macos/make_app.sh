@@ -12,6 +12,16 @@
 # Nothing derived from the disc goes into the bundle: the engine is built with
 # shared recomp linkage, and only the recompile kit (function lists, the
 # module source kit, PSXRecomp) is staged.
+#
+# Every binary targets macOS $MACOSX_DEPLOYMENT_TARGET (13.0 by default, set in
+# env.sh); OpenAL Soft is built for it by build_openal.sh, since Homebrew's
+# bottle only runs on the macOS it was built for.
+#
+# Signing: ad-hoc unless OPENPETE_SIGN_IDENTITY names a "Developer ID
+# Application: ..." certificate in the keychain, in which case every binary is
+# signed with it, the hardened runtime and a secure timestamp, ready for
+# notarization (tools/macos/make_dmg.sh). OPENPETE_SIGN_IDENTITY=- signs ad-hoc
+# with the hardened runtime, to test the entitlements without a certificate.
 set -euo pipefail
 
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"
@@ -24,18 +34,30 @@ die() { printf '\033[1;31merror:\033[0m %s\n' "$*" >&2; exit 1; }
 cd "$ROOT"
 APP="${1:-$ROOT/build/OpenPete.app}"
 [[ "$APP" == *.app ]] || die "output must end in .app: $APP"
+# shellcheck source=env.sh
+source tools/macos/env.sh
+TARGET="$MACOSX_DEPLOYMENT_TARGET"
+
+minos() { otool -l "$1" | awk '/LC_BUILD_VERSION/{b=1} b&&/minos/{print $2; exit}'; }
+newer_than_target() {   # true when the Mach-O at $1 needs a newer macOS
+    [[ "$(printf '%s\n%s\n' "$(minos "$1")" "$TARGET" | sort -V | tail -1)" != "$TARGET" ]]
+}
+
 if [[ ! -x third_party/psxrecomp/build/PSXRecomp \
       || ! -f games/spyro-1/generated/psyq_stubs.c \
-      || ! -f games/spyro-1/generated/channel_sites.txt ]]; then
+      || ! -f games/spyro-1/generated/channel_sites.txt ]] \
+   || newer_than_target third_party/psxrecomp/build/PSXRecomp; then
     say "Preparing the toolchain (tools/macos/build.sh, no disc)"
     tools/macos/build.sh
 fi
 
-# shellcheck source=env.sh
-source tools/macos/env.sh
+OAL="$(tools/macos/build_openal.sh)"
 
 say "Building the engine (shared recomp linkage, no game code)"
-cmake --preset macos-arm64-app >/dev/null
+cmake --preset macos-arm64-app \
+    -DCMAKE_OSX_DEPLOYMENT_TARGET="$TARGET" \
+    -DOPENAL_INCLUDE_DIR="$OAL/include" \
+    -DOPENAL_LIBRARY="$OAL/lib/libopenal.1.dylib" >/dev/null
 cmake --build --preset macos-arm64-app
 
 B=build/macos-app/games/spyro-1
@@ -48,16 +70,22 @@ C="$APP/Contents"
 mkdir -p "$C/MacOS" "$C/Frameworks" "$C/Resources/licences" "$C/Resources/recomp/tools"
 
 cp "$B/$EXE" "$C/MacOS/$EXE"
-cp "$BREW/opt/openal-soft/lib/libopenal.1.dylib" "$C/Frameworks/"
+cp "$OAL/lib/libopenal.1.dylib" "$C/Frameworks/"
 cp "$BREW/opt/molten-vk/lib/libMoltenVK.dylib" "$C/Frameworks/"
-chmod u+w "$C/Frameworks/"*.dylib
-install_name_tool -id @rpath/libopenal.1.dylib "$C/Frameworks/libopenal.1.dylib"
-install_name_tool -id @rpath/libMoltenVK.dylib "$C/Frameworks/libMoltenVK.dylib"
-install_name_tool -change "$BREW/opt/openal-soft/lib/libopenal.1.dylib" \
-    @executable_path/../Frameworks/libopenal.1.dylib "$C/MacOS/$EXE"
-if otool -L "$C/MacOS/$EXE" | grep -q /opt/homebrew; then
-    die "the engine still references Homebrew libraries:
-$(otool -L "$C/MacOS/$EXE" | grep /opt/homebrew)"
+chmod u+w "$C/Frameworks/"*.dylib "$C/MacOS/$EXE"
+install_name_tool -id @rpath/libopenal.1.dylib "$C/Frameworks/libopenal.1.dylib" 2>/dev/null
+install_name_tool -id @rpath/libMoltenVK.dylib "$C/Frameworks/libMoltenVK.dylib" 2>/dev/null
+OAL_REF="$(otool -L "$C/MacOS/$EXE" | awk '/libopenal/{print $1; exit}')"
+install_name_tool -change "$OAL_REF" \
+    @executable_path/../Frameworks/libopenal.1.dylib "$C/MacOS/$EXE" 2>/dev/null
+# Build-tree rpaths name this machine's directories: drop every absolute one.
+otool -l "$C/MacOS/$EXE" | awk '/LC_RPATH/{r=1} r&&/ path /{print $2; r=0}' \
+    | grep '^/' | while IFS= read -r rp; do
+        install_name_tool -delete_rpath "$rp" "$C/MacOS/$EXE" 2>/dev/null
+    done
+if otool -L "$C/MacOS/$EXE" | grep -q -e /opt/homebrew -e "$ROOT"; then
+    die "the engine still references libraries outside the bundle:
+$(otool -L "$C/MacOS/$EXE" | grep -e /opt/homebrew -e "$ROOT")"
 fi
 
 # Shipped read-only data: openpete_exe_dir() is Contents/Resources in a bundle.
@@ -70,7 +98,8 @@ cp -R "$B/sdk" "$R/"   # mod SDK: the loader compiles code mods against it
 cp gamecontrollerdb.txt "$R/"
 cp docs/openpete-dist.toml "$R/openpete.toml"
 cp LICENSE NOTICE.md "$R/"
-cp "$BREW/opt/openal-soft/COPYING" "$R/licences/OpenAL-Soft-COPYING.txt"
+cp "$OAL/COPYING" "$R/licences/OpenAL-Soft-COPYING.txt"
+cp "$OAL/SOURCE" "$R/licences/OpenAL-Soft-SOURCE.txt"
 cp "$BREW/opt/molten-vk/LICENSE" "$R/licences/MoltenVK-LICENSE.txt"
 cp third_party/psxrecomp/LICENSE "$R/licences/PSXRecomp-LICENSE.txt"
 cp third_party/imgui/LICENSE.txt "$R/licences/DearImGui-LICENSE.txt"
@@ -117,7 +146,7 @@ cat > "$C/Info.plist" <<PLIST
     <key>CFBundlePackageType</key>         <string>APPL</string>
     <key>CFBundleShortVersionString</key>  <string>${VERSION#v}</string>
     <key>CFBundleVersion</key>             <string>${VERSION#v}</string>
-    <key>LSMinimumSystemVersion</key>      <string>13.0</string>
+    <key>LSMinimumSystemVersion</key>      <string>$TARGET</string>
     <key>LSArchitecturePriority</key>      <array><string>arm64</string></array>
     <key>LSApplicationCategoryType</key>   <string>public.app-category.games</string>
     <key>NSHighResolutionCapable</key>     <true/>
@@ -136,12 +165,30 @@ cat > "$C/Info.plist" <<PLIST
 </plist>
 PLIST
 
-say "Signing (ad-hoc)"
-for f in "$C/Frameworks/"*.dylib "$R/recomp/tools/PSXRecomp" "$C/MacOS/$EXE"; do
-    codesign --force --sign - "$f"
+say "Checking every binary runs on macOS $TARGET"
+BINS=("$C/Frameworks/"*.dylib "$R/recomp/tools/PSXRecomp" "$C/MacOS/$EXE")
+for f in "${BINS[@]}"; do
+    if newer_than_target "$f"; then
+        die "${f#"$C/"} needs macOS $(minos "$f"), newer than $TARGET"
+    fi
 done
-codesign --force --sign - "$APP"
-codesign --verify --strict "$APP"
+
+IDENTITY="${OPENPETE_SIGN_IDENTITY:-}"
+if [[ -z "$IDENTITY" ]]; then
+    say "Signing (ad-hoc)"
+    for f in "${BINS[@]}"; do codesign --force --sign - "$f"; done
+    codesign --force --sign - "$APP"
+else
+    say "Signing with the hardened runtime ($IDENTITY)"
+    # The engine dlopens the game module and code mods that are compiled on
+    # the player's Mac, so library validation has to be off for it.
+    SIGN=(codesign --force --options runtime --sign "$IDENTITY")
+    [[ "$IDENTITY" == "-" ]] || SIGN+=(--timestamp)
+    for f in "$C/Frameworks/"*.dylib "$R/recomp/tools/PSXRecomp"; do "${SIGN[@]}" "$f"; done
+    "${SIGN[@]}" --entitlements tools/macos/OpenPete.entitlements "$C/MacOS/$EXE"
+    "${SIGN[@]}" --entitlements tools/macos/OpenPete.entitlements "$APP"
+fi
+codesign --verify --strict --deep "$APP"
 
 du -sh "$APP" | awk '{print "==> " $2 ": " $1}'
 say "Done. Open it with:  open \"$APP\""

@@ -16,37 +16,48 @@ Rendering is Vulkan on Metal through MoltenVK. Intel Macs are not supported.
 > save files. It is not reviewed or supported by the OpenPete authors; please
 > don't report problems with this port upstream.
 
-## What you need
+## Install
 
-- An Apple Silicon Mac, [Homebrew](https://brew.sh) and Git.
-- Your own disc image of **Spyro the Dragon, NTSC-U (SCUS-94228)** as a
-  `.cue` + `.bin` pair, to play. Other regions and the Spyro 2 / 3 discs do
-  not work; the disc is checked and refused if it is the wrong one. No build
-  step needs it: the app asks for it on first launch, and `build.sh` takes it
-  only if you give it.
+To play you need an Apple Silicon Mac with **macOS 13 or later** and your own
+disc image of **Spyro the Dragon, NTSC-U (SCUS-94228)** as a `.cue` + `.bin`
+pair. Other regions and the Spyro 2 / 3 discs do not work; the disc is checked
+and refused if it is the wrong one.
 
-No PSYQ SDK, Docker or MIPS toolchain is needed.
+1. Get `OpenPete-<version>.dmg` from this repository's Releases page, or build
+   it yourself (below).
+2. Open the disk image and drag **OpenPete** onto **Applications**, then eject
+   the image.
+3. Open OpenPete from Applications (or Launchpad).
 
-```bash
-git clone --recursive https://github.com/sbuicodev/openpete-macos.git
-cd openpete-macos
-```
+### If macOS says it can't verify OpenPete
 
-## Make the app
+Release builds are not notarized by Apple (that needs a paid Apple Developer
+account), so Gatekeeper blocks the first launch with a message that Apple
+could not verify OpenPete is free of malware. Allow it once; after that it
+opens normally:
 
-```bash
-./make-app.sh            # -> build/OpenPete.app (about 19 MB)
-```
+- **macOS 15 Sequoia and later:** open OpenPete and click **Done** in the
+  warning. Open **System Settings → Privacy & Security**, scroll to the
+  message saying OpenPete was blocked and click **Open Anyway**, confirm with
+  your password or Touch ID, then click **Open Anyway** in the dialog that
+  follows.
+- **macOS 13 Ventura and 14 Sonoma:** in Applications, Control-click (or
+  right-click) OpenPete, choose **Open**, then click **Open** in the dialog.
 
-On a fresh clone this first runs `./build.sh` without a disc (below) to set up
-the toolchain, then builds the app.
+Only do this for a copy you downloaded from this repository or built yourself.
+Do not turn Gatekeeper off system-wide (`spctl --master-disable`); allowing
+this one app is enough. The disk image carries the same steps in a text file.
+A build signed and notarized with a Developer ID certificate (see below) opens
+without any of this.
+
+### First launch
 
 The app contains **no game code or data**: just the engine, MoltenVK, OpenAL
 Soft, the recompile kit (PSXRecomp, per-overlay function-address lists, a
 six-file module source kit), the mod SDK, a generated icon and licence texts.
 
-1. **First launch:** a splash asks for the disc image. Drag the `.cue`/`.bin`
-   onto the window or the app icon, or press Space to browse.
+1. A splash asks for the disc image. Drag the `.cue`/`.bin` onto the window or
+   the app icon, or press Space to browse.
 2. The disc is copied into the library (`~/.local/share/openpete/library/`);
    the original file is not needed after that.
 3. The game is recompiled into a module on that Mac (about 30 seconds). This
@@ -54,12 +65,59 @@ six-file module source kit), the mod SDK, a generated icon and licence texts.
    install them and the app asks to be relaunched.
 4. **Later launches** start the game directly.
 
-Settings save to `~/.config/openpete/openpete.toml`; memory cards and logs
-live in `~/.local/state/openpete/`. The app is ad-hoc signed, not notarized:
-on another Mac, the first launch of a downloaded copy needs right-click →
-**Open** (or allow it under System Settings → Privacy & Security).
+Settings save to `~/.config/openpete/` and memory cards and logs to
+`~/.local/state/openpete/`; nothing is written inside the app, so its
+signature stays valid.
 
-## Build from the command line
+## Build it yourself
+
+You need an Apple Silicon Mac, [Homebrew](https://brew.sh), Git and Apple's
+Command Line Tools. With full Xcode 26 or later the app also gets the layered
+Icon Composer icon; otherwise it uses a flat one. No disc, PSYQ SDK, Docker or
+MIPS toolchain is needed to build the app.
+
+```bash
+git clone --recursive https://github.com/sbuicodev/openpete-macos.git
+cd openpete-macos
+```
+
+### Make the app
+
+```bash
+./make-app.sh            # -> build/OpenPete.app (about 21 MB)
+```
+
+On a fresh clone this first runs `./build.sh` without a disc (below) to set up
+the toolchain, then builds the app. Every binary in it targets macOS 13: the
+engine and PSXRecomp are built for it, and OpenAL Soft is built from Homebrew's
+source for it (Homebrew's own build runs only on the macOS it was made for).
+The script stops if any binary would need a newer macOS.
+
+### Make a disk image
+
+```bash
+./make-dmg.sh            # -> build/OpenPete-<version>.dmg (about 9 MB)
+```
+
+This builds a fresh app (never one that has been run) and puts it next to an
+Applications shortcut and the Gatekeeper instructions above. By default the app
+is signed ad-hoc. To publish one that opens without the Gatekeeper prompt,
+join the Apple Developer Program, install a **Developer ID Application**
+certificate in your keychain, store notarization credentials once with
+`xcrun notarytool store-credentials openpete`, and run:
+
+```bash
+OPENPETE_SIGN_IDENTITY="Developer ID Application: Your Name (TEAMID)" OPENPETE_NOTARY_PROFILE=openpete ./make-dmg.sh
+```
+
+That signs every binary with the hardened runtime and a secure timestamp,
+signs the disk image, notarizes it and staples the ticket. The engine keeps one
+entitlement, `com.apple.security.cs.disable-library-validation`, because it
+loads the game module and code mods compiled on the player's Mac.
+`OPENPETE_SIGN_IDENTITY=-` signs ad-hoc with the hardened runtime, to test that
+setup without a certificate.
+
+### Build from the command line
 
 ```bash
 ./build.sh                                          # toolchain only
@@ -180,6 +238,7 @@ and commit the updated `patches/` and `overlay/` here.
 | 0013 | runtime: inside an `.app` keep the bundle's Dock icon (`SDL_SetWindowIcon` would replace it) |
 | 0014 | build: a shared-linkage (`.app`) build configures without recompiled output, so it needs no disc |
 | 0015 | first launch: on macOS the splash and build progress say "Mac", not "PC" |
+| 0016 | devui: inside an `.app` save `openpete-devui.ini` to `~/.config/openpete`, not into the bundle |
 | psycross 0001 | arm64 primitive layout, `<stdlib.h>`, a half-float cast |
 
 Notes on the port:
@@ -209,8 +268,10 @@ Notes on the port:
   no game code and recompiles the player's own disc on first launch.
 - **No PSYQ SDK** is included or required.
 - Third-party components keep their own licences; see upstream's `NOTICE.md`.
-  The app bundles OpenAL Soft (LGPL, dynamically linked and replaceable),
-  MoltenVK (Apache-2.0) and PSXRecomp, with their licence texts.
+  The app bundles OpenAL Soft 1.25.2 (GNU LGPL; built unmodified from its
+  release tarball, dynamically linked and replaceable in
+  `Contents/Frameworks`; `licences/OpenAL-Soft-SOURCE.txt` in the app names
+  the source), MoltenVK (Apache-2.0) and PSXRecomp, with their licence texts.
 
 *Spyro the Dragon* and related marks are trademarks of their respective owners
 and are used only to identify the game this software is compatible with. This

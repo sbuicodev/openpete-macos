@@ -54,7 +54,8 @@ source tools/macos/env.sh
 
 say "Building the PSXRecomp recompiler"
 cmake -S third_party/psxrecomp/recompiler -B third_party/psxrecomp/build -G Ninja \
-      -DCMAKE_BUILD_TYPE=Release -DCMAKE_CXX_FLAGS=-DFMT_CONSTEVAL= >/dev/null
+      -DCMAKE_BUILD_TYPE=Release -DCMAKE_CXX_FLAGS=-DFMT_CONSTEVAL= \
+      -DCMAKE_OSX_DEPLOYMENT_TARGET="$MACOSX_DEPLOYMENT_TARGET" >/dev/null
 cmake --build third_party/psxrecomp/build
 
 if [[ -z "$DISC" ]]; then
