@@ -1,0 +1,61 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: Stefano Buico <stefano.buico@gmail.com>
+Date: Thu, 26 Nov 2026 01:39:17 +0100
+Subject: [PATCH] mods: compile code mods on macOS
+
+ld64 refuses a dylib with undefined symbols unless told to look them up
+when the engine dlopens it. The macos-arm64 preset turns the build-time
+mod compile back on, and the .app build stages the mod SDK.
+---
+ CMakePresets.json      | 6 +++---
+ core/mods/mod_loader.c | 6 ++++++
+ 2 files changed, 9 insertions(+), 3 deletions(-)
+
+diff --git a/CMakePresets.json b/CMakePresets.json
+index b1b5d306..5bfa512d 100644
+--- a/CMakePresets.json
++++ b/CMakePresets.json
+@@ -61,7 +61,7 @@
+         "OPENPETE_BUILD_TESTS": "OFF",
+         "OPENPETE_ENABLE_RECORD": "OFF",
+         "OPENPETE_BUILD_PCSX_REDUX_GTE": "OFF",
+-        "OPENPETE_COMPILE_MODS": "OFF",
++        "OPENPETE_COMPILE_MODS": "ON",
+         "OPENPETE_STAGE_MOD_DLLS": "OFF",
+         "OPENAL_INCLUDE_DIR": "/opt/homebrew/opt/openal-soft/include",
+         "OPENAL_LIBRARY": "/opt/homebrew/opt/openal-soft/lib/libopenal.dylib"
+@@ -128,12 +128,12 @@
+     {
+       "name": "macos-arm64",
+       "configurePreset": "macos-arm64",
+-      "targets": ["openpete-spyro1"]
++      "targets": ["openpete-spyro1", "spyro1_mods"]
+     },
+     {
+       "name": "macos-arm64-app",
+       "configurePreset": "macos-arm64-app",
+-      "targets": ["openpete-spyro1"]
++      "targets": ["openpete-spyro1", "spyro1_sdk_stage"]
+     },
+     {
+       "name": "wasm",
+diff --git a/core/mods/mod_loader.c b/core/mods/mod_loader.c
+index 8afaf596..5f762613 100644
+--- a/core/mods/mod_loader.c
++++ b/core/mods/mod_loader.c
+@@ -2474,6 +2474,12 @@ static int mod_compile(const char* mod_dir, const char* id,
+ #ifdef _WIN32
+     static const char* const flags =
+         "-shared -O2 -g -fno-strict-aliasing -Wall";
++#elif defined(__APPLE__)
++    /* ld64 refuses undefined symbols in a dylib by default; the engine
++     * resolves them when it dlopens the mod, as ELF does. */
++    static const char* const flags =
++        "-shared -fPIC -arch arm64 -Wl,-undefined,dynamic_lookup "
++        "-O2 -g -fno-strict-aliasing -Wall";
+ #else
+     static const char* const flags =
+         "-shared -fPIC -O2 -g -fno-strict-aliasing -Wall";
+-- 
+2.54.0 (Apple Git-157)
+

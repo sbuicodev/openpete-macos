@@ -1,7 +1,7 @@
-From bc4d76021814b1e32c4f87491c148ef6c5fe7fc2 Mon Sep 17 00:00:00 2001
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
 From: Stefano Buico <stefano.buico@gmail.com>
 Date: Wed, 25 Nov 2026 21:12:01 +0100
-Subject: [PATCH 2/7] core: macOS executable path; bundle-aware install dir
+Subject: [PATCH] core: macOS executable path; bundle-aware install dir
 
 ---
  core/config/paths.c                  | 34 +++++++++++++++++++++++++++-

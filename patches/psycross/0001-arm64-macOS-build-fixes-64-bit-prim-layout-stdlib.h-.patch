@@ -1,4 +1,4 @@
-From 834e34cb6081ce30f2c3e2733a7dec9eb998665a Mon Sep 17 00:00:00 2001
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
 From: Stefano Buico <stefano.buico@gmail.com>
 Date: Wed, 25 Nov 2026 21:12:08 +0100
 Subject: [PATCH] arm64 macOS build fixes: 64-bit prim layout, stdlib.h,

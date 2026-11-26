@@ -1,0 +1,828 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: Tyson Cleary <tyscorp@gmail.com>
+Date: Mon, 21 Sep 2026 10:13:30 -0500
+Subject: [PATCH] mods: pad_rumble drives players 2-4's motors per slot (api
+ 12)
+
+Backport of upstream 1a29dd37 without its pad-probe test mod, its slot
+check script and the complexity baseline.
+---
+ core/include/openpete_host_input.h |  28 ++++-
+ core/include/openpete_mod_api.h    |  43 ++++++++
+ core/include/openpete_rumble.h     |  37 ++++++-
+ core/input/host_input.c            | 140 +++++++++++++++--------
+ core/input/host_rumble.c           | 171 +++++++++++++++++++++++------
+ core/mods/mod_loader.c             |  44 ++++++++
+ core/runtime/run.c                 |  89 +++++++++------
+ docs/modding/pages/code.md         |   1 +
+ 8 files changed, 429 insertions(+), 124 deletions(-)
+
+diff --git a/core/include/openpete_host_input.h b/core/include/openpete_host_input.h
+index 815e277d..3edb16d4 100644
+--- a/core/include/openpete_host_input.h
++++ b/core/include/openpete_host_input.h
+@@ -191,11 +191,29 @@ int openpete_host_input_pulse_hold_us(void);
+  * nothing on its own — it reads the same whether nothing rumbled or the
+  * recorder was never wired — so a self-probe issues one deliberate non-zero
+  * pair at attach and asserts it arrived. Check `_live` before treating a zero
+- * as evidence; a harness that skips it is reporting a vacuous pass. */
+-int  openpete_host_input_vpad_rumble_calls(void);
+-int  openpete_host_input_vpad_rumble_nonzero(void);
+-int  openpete_host_input_vpad_rumble_live(void);
+-void openpete_host_input_vpad_rumble_last(unsigned* low, unsigned* high);
++ * as evidence; a harness that skips it is reporting a vacuous pass.
++ *
++ * Counted per virtual pad, `pad` indexing the pads OPENPETE_INPUT_VGAMEPAD
++ * attached (0 is the one PsyCross takes as player 1). A single global counter
++ * cannot answer which device a command reached, which is the whole question
++ * once more than one slot can be driven: one pad's commands would be
++ * indistinguishable from another's. Each pad carries its own callback,
++ * counters and self-probe. */
++int  openpete_host_input_vpad_rumble_calls(int pad);
++int  openpete_host_input_vpad_rumble_nonzero(int pad);
++int  openpete_host_input_vpad_rumble_live(int pad);
++void openpete_host_input_vpad_rumble_last(int pad, unsigned* low, unsigned* high);
++/* How many virtual pads are attached; 0 when the harness is off. */
++int  openpete_host_input_vpad_count(void);
++
++/* The SDL joystick instance id driving pad slot `slot` (1..OPENPETE_PAD_SLOTS-1),
++ * or 0 for an empty slot.
++ *
++ * An id, not a handle: these gamepads are opened and pruned on the sampling
++ * thread while the rumble pump runs on another, so the pump resolves the id
++ * with SDL_GetGamepadFromID at drive time and a prune in between reads as a
++ * NULL rather than as a use-after-close. */
++unsigned openpete_host_input_slot_device_id(int slot);
+ 
+ /* Parity instrument (--input-parity). Compares what the host actually drove
+  * into the pad against a fresh live decode taken in the same iteration, on the
+diff --git a/core/include/openpete_mod_api.h b/core/include/openpete_mod_api.h
+index 4730ab32..2a448539 100644
+--- a/core/include/openpete_mod_api.h
++++ b/core/include/openpete_mod_api.h
+@@ -937,6 +937,49 @@ typedef struct openpete_mod_api {
+      */
+     int (*pad_read)(openpete_mod_t* self, uint32_t slot,
+                     openpete_mod_pad_t* out);
++
++    /**
++     * @brief Drive player @p slot's rumble motors.
++     *
++     * The two arguments are libpad's actuator bytes, the same pair the
++     * game writes into its own actuator buffer: @p small_byte is the
++     * small motor's on/off byte (bit 0) and @p large_byte the large
++     * motor's 0..255 byte. One byte-to-motor conversion serves every
++     * slot, carrying the user's vibration strength setting, so a mod
++     * neither needs a second mapping nor can bypass the setting.
++     *
++     * Slots 1..#OPENPETE_MOD_PAD_SLOTS-1. Slot 0 is refused (reported
++     * once per mod): it is the game's own actuator table, and a second
++     * writer would fight it.
++     *
++     * Level-triggered. The pair persists, re-issued to the device with a
++     * dead-man refresh, until the next call for that slot or until the
++     * mod is disabled or unloaded, either of which silences the slots the
++     * mod drove. Publish `{0, 0}` to stop.
++     *
++     * A speculative runahead tick and a rewind-burst replay accept the
++     * call and do nothing: those timelines were never lived, and buzzing
++     * for them is a side effect escaping the re-execution. A tick hook
++     * therefore needs no speculation test of its own. The host's own
++     * refusals still apply at drive time — headless, an unfocused window,
++     * pause, a strength of 0.
++     *
++     * To carry a swapped-in player's rumble, decode that player's timers
++     * the way the game decodes player 1's (normal `{1,120}`, electric
++     * `{1,0}`, custom `{0,amount}`, else `{0,0}`, timers decremented once
++     * per VBL) in a `PadVSync` post-hook and pass the result here. The
++     * game's own decode is not re-entrant per player, so it cannot be
++     * called for them.
++     *
++     * @param slot        1..#OPENPETE_MOD_PAD_SLOTS-1.
++     * @param small_byte  small motor, on/off (bit 0).
++     * @param large_byte  large motor, 0..255.
++     * @return 0, or -1 for slot 0, a slot out of range, or a call from a
++     *         present hook.
++     * @since api 12
++     */
++    int (*pad_rumble)(openpete_mod_t* self, uint32_t slot,
++                      uint32_t small_byte, uint32_t large_byte);
+     /** @} */
+ } openpete_mod_api_t;
+ 
+diff --git a/core/include/openpete_rumble.h b/core/include/openpete_rumble.h
+index 387ff98c..173d1af5 100644
+--- a/core/include/openpete_rumble.h
++++ b/core/include/openpete_rumble.h
+@@ -99,16 +99,43 @@ void openpete_rumble_stop(void);
+ /* Headless is a refusal, not a default: no window means no player. */
+ void openpete_rumble_set_headless(int headless);
+ 
+-/* Name the harness's virtual pad (OPENPETE_INPUT_VGAMEPAD), by SDL instance id.
++/* Name one of the harness's virtual pads (OPENPETE_INPUT_VGAMEPAD), by SDL
++ * instance id. Call once per pad: the devices form a SET, because the harness
++ * attaches one per slot and every one of them has to be drivable headlessly
++ * for a per-slot claim to be observable at all.
+  *
+  * The headless and focus refusals protect a human's controller; a virtual
+- * device a harness attached is not one. Lifting them for that device — and
+- * only that device, re-checked against the handle actually driven — is what
+- * lets the vibration oracle observe the REAL apply path headlessly, instead of
+- * testing a mock of it. A real pad that has taken slot 0 will not match, so a
++ * device a harness attached is not one. Lifting them for those devices — and
++ * only those, re-checked against the handle actually driven — is what lets the
++ * vibration oracle observe the real apply path headlessly, instead of testing
++ * a mock of it. A real pad that has taken a slot is not in the set, so a
+  * diagnostic run still cannot buzz a controller on the desk. */
+ void openpete_rumble_set_test_device(unsigned instance_id);
+ 
++/* ---- mod-driven slots --------------------------------------------------- */
++
++/* Publish slot `slot`'s motor pair from a mod, in libpad's actuator encoding:
++ * `small_byte` is the small motor's on/off byte and `large_byte` the large
++ * motor's 0..255 byte — the two bytes the game itself writes to its actuator
++ * buffer. Converting here means the ONE byte-to-motor conversion, with the
++ * user's strength setting, serves every slot: a mod cannot carry a second
++ * mapping and cannot bypass the setting.
++ *
++ * Slots 1..OPENPETE_PAD_SLOTS-1 only. Slot 0 is the game's own actuator table
++ * and a second writer would fight it.
++ *
++ * Level-triggered: the pair persists, re-driven every pump iteration with the
++ * dead-man refresh above, until the next call for that slot or until the slot
++ * is cleared. Publish {0,0} to stop. */
++void openpete_rumble_mod_set(int slot, int small_byte, int large_byte);
++
++/* Silence one mod-driven slot (mod disabled, unloaded, or reloaded). */
++void openpete_rumble_mod_clear(int slot);
++
++/* SDL rumble calls issued for a mod-driven slot, and its published pair. */
++unsigned openpete_rumble_mod_commands(int slot);
++void     openpete_rumble_mod_pair(int slot, uint16_t* low, uint16_t* high);
++
+ /* 0..10 host strength, -1 = unset (parity). Mirrors --vibration. */
+ void openpete_rumble_set_strength(int strength);
+ int  openpete_rumble_get_strength(void);
+diff --git a/core/input/host_input.c b/core/input/host_input.c
+index 62447643..75f6996b 100644
+--- a/core/input/host_input.c
++++ b/core/input/host_input.c
+@@ -15,6 +15,7 @@
+ #include "openpete_pace_log.h"
+ 
+ #include <stdatomic.h>
++#include <stdint.h>
+ #include <string.h>
+ #include <stdlib.h>
+ 
+@@ -307,7 +308,11 @@ typedef struct {
+     SDL_AtomicInt probe_seen;   /* the self-probe pair arrived */
+ } vpad_rumble_rec_t;
+ 
+-static vpad_rumble_rec_t s_vpad_rumble;
++/* One recorder per virtual pad. Which device a motor command reached is the
++ * question as soon as more than one slot can be driven, and a single set of
++ * counters cannot answer it: the callback carries its pad index as userdata
++ * so every command is attributed to the device that received it. */
++static vpad_rumble_rec_t s_vpad_rumble[OPENPETE_PAD_SLOTS];
+ 
+ /* Distinctive enough that the probe cannot be confused with a game value: the
+  * curve never produces equal low and high bytes at this magnitude. */
+@@ -316,39 +321,56 @@ static vpad_rumble_rec_t s_vpad_rumble;
+ 
+ static bool SDLCALL vpad_rumble_cb(void* userdata, Uint16 low, Uint16 high)
+ {
+-    (void)userdata;
+-    SDL_AddAtomicInt(&s_vpad_rumble.calls, 1);
++    int v = (int)(intptr_t)userdata;
++    if (v < 0 || v >= OPENPETE_PAD_SLOTS) return true;
++    vpad_rumble_rec_t* r = &s_vpad_rumble[v];
++    SDL_AddAtomicInt(&r->calls, 1);
+     if (low || high)
+-        SDL_AddAtomicInt(&s_vpad_rumble.nonzero, 1);
+-    SDL_SetAtomicInt(&s_vpad_rumble.last,
+-                     (int)(((Uint32)high << 16) | (Uint32)low));
++        SDL_AddAtomicInt(&r->nonzero, 1);
++    SDL_SetAtomicInt(&r->last, (int)(((Uint32)high << 16) | (Uint32)low));
+     if (low == VPAD_PROBE_LOW && high == VPAD_PROBE_HIGH)
+-        SDL_SetAtomicInt(&s_vpad_rumble.probe_seen, 1);
++        SDL_SetAtomicInt(&r->probe_seen, 1);
+     return true;
+ }
+ 
+-int openpete_host_input_vpad_rumble_calls(void)
++static int vpad_index_ok(int pad)
+ {
+-    return SDL_GetAtomicInt(&s_vpad_rumble.calls);
++    return pad >= 0 && pad < OPENPETE_PAD_SLOTS;
+ }
+ 
+-int openpete_host_input_vpad_rumble_nonzero(void)
++int openpete_host_input_vpad_rumble_calls(int pad)
+ {
+-    return SDL_GetAtomicInt(&s_vpad_rumble.nonzero);
++    return vpad_index_ok(pad) ? SDL_GetAtomicInt(&s_vpad_rumble[pad].calls) : 0;
+ }
+ 
+-int openpete_host_input_vpad_rumble_live(void)
++int openpete_host_input_vpad_rumble_nonzero(int pad)
+ {
+-    return SDL_GetAtomicInt(&s_vpad_rumble.probe_seen);
++    return vpad_index_ok(pad) ? SDL_GetAtomicInt(&s_vpad_rumble[pad].nonzero) : 0;
+ }
+ 
+-void openpete_host_input_vpad_rumble_last(unsigned* low, unsigned* high)
++int openpete_host_input_vpad_rumble_live(int pad)
+ {
+-    Uint32 p = (Uint32)SDL_GetAtomicInt(&s_vpad_rumble.last);
++    return vpad_index_ok(pad) ? SDL_GetAtomicInt(&s_vpad_rumble[pad].probe_seen) : 0;
++}
++
++void openpete_host_input_vpad_rumble_last(int pad, unsigned* low, unsigned* high)
++{
++    Uint32 p = vpad_index_ok(pad)
++             ? (Uint32)SDL_GetAtomicInt(&s_vpad_rumble[pad].last) : 0u;
+     if (low)  *low  = (unsigned)(p & 0xFFFFu);
+     if (high) *high = (unsigned)(p >> 16);
+ }
+ 
++int openpete_host_input_vpad_count(void)
++{
++    int n = 0;
++    for (int v = 0; v < OPENPETE_PAD_SLOTS; v++)
++        if (s_vpads[v]) n++;
++    return n;
++}
++
++static void vpad_selfprobe(int v, SDL_JoystickID id);
++
+ static void vgamepad_maybe_attach(void)
+ {
+     if (s_vpad_state < 0) {
+@@ -367,6 +389,8 @@ static void vgamepad_maybe_attach(void)
+         return;
+ 
+     SDL_JoystickID id = 0;
++    SDL_JoystickID vpad_ids[OPENPETE_PAD_SLOTS];
++    memset(vpad_ids, 0, sizeof vpad_ids);
+     const int want = s_vpad_state;
+     for (int v = 0; v < want; v++) {
+         SDL_VirtualJoystickDesc desc;
+@@ -377,10 +401,11 @@ static void vgamepad_maybe_attach(void)
+         desc.name       = "openpete virtual pad";
+         desc.button_mask = 0xFFFFu;
+         desc.axis_mask   = 0x3Fu;
+-        /* Only pad 0 carries the rumble callback: the recorder counts motor
+-         * commands globally, and a second reporting pad would make the
+-         * self-probe ambiguous about which device answered. */
+-        desc.Rumble      = (v == 0) ? vpad_rumble_cb : NULL;
++        /* Every pad records, and the index it reports with is its userdata:
++         * a command's destination device is the claim a per-slot actuator
++         * path has to prove, and one shared counter cannot carry it. */
++        desc.Rumble      = vpad_rumble_cb;
++        desc.userdata    = (void*)(intptr_t)v;
+ 
+         SDL_JoystickID vid = SDL_AttachVirtualJoystick(&desc);
+         if (!vid) {
+@@ -396,6 +421,7 @@ static void vgamepad_maybe_attach(void)
+             if (v == 0) { s_vpad_state = 0; return; }
+             break;
+         }
++        vpad_ids[v] = vid;
+         if (v == 0) id = vid;
+     }
+     /* Attaching is not the same as being usable: the pad only reaches decode
+@@ -411,37 +437,42 @@ static void vgamepad_maybe_attach(void)
+         OPL_INFO_F("input", "VIRTUAL gamepad attached (id=%u) — diagnostic only",
+                    (unsigned)id);
+ 
+-    /* Let the actuator path drive this device even headless / unfocused. The
+-     * gates it lifts exist to protect a human's controller, and this one is
+-     * ours; the id is re-checked against the handle actually driven, so a real
+-     * pad that took slot 0 still gets the normal treatment. */
++    for (int v = 0; v < OPENPETE_PAD_SLOTS; v++)
++        if (s_vpads[v]) vpad_selfprobe(v, vpad_ids[v]);
++}
++
++/* Arm one virtual pad as a test device and prove its recorder is wired.
++ *
++ * The actuator path may drive this device even headless and unfocused: the
++ * gates it lifts exist to protect a human's controller, and this one is ours.
++ * Membership is by instance id and is re-checked against the handle actually
++ * driven, so a real pad that took a slot still gets the normal treatment.
++ *
++ * The probe itself is one deliberate non-zero pair, asserted to arrive before
++ * any run is allowed to read a zero as "the motors stayed silent". It is
++ * instrumentation, not data: the counters are zeroed behind it so everything
++ * they report afterwards is a motor command something else asked for. Leaving
++ * it in the totals would make a run that delivered nothing report one non-zero
++ * command, indistinguishable from a run that delivered exactly one. */
++static void vpad_selfprobe(int v, SDL_JoystickID id)
++{
+     openpete_rumble_set_test_device((unsigned)id);
+ 
+-    /* Self-probe: prove the rumble recorder is wired before any run is allowed
+-     * to interpret a zero as "the motors stayed silent". Issued through
+-     * SDL_RumbleJoystick on the pad we just opened, then immediately cleared
+-     * so the probe cannot be mistaken for game output. If this does not
+-     * arrive, the oracle is broken and must fail rather than pass quietly. */
+-    SDL_RumbleJoystick(s_vpad, VPAD_PROBE_LOW, VPAD_PROBE_HIGH, 50);
+-    SDL_RumbleJoystick(s_vpad, 0, 0, 0);
+-
+-    /* The probe is instrumentation, not data: zero the counters behind it so
+-     * everything they report afterwards is the GAME driving motors. Leaving it
+-     * in the totals is not a rounding error — it makes a run that delivered
+-     * nothing report one non-zero command, which is indistinguishable from a
+-     * run that delivered exactly one. (Measured: that is precisely how the
+-     * gate's legacy leg first read, a false FAIL against working code.) */
+-    SDL_SetAtomicInt(&s_vpad_rumble.calls, 0);
+-    SDL_SetAtomicInt(&s_vpad_rumble.nonzero, 0);
+-    SDL_SetAtomicInt(&s_vpad_rumble.last, 0);
+-
+-    if (!SDL_GetAtomicInt(&s_vpad_rumble.probe_seen))
++    SDL_RumbleJoystick(s_vpads[v], VPAD_PROBE_LOW, VPAD_PROBE_HIGH, 50);
++    SDL_RumbleJoystick(s_vpads[v], 0, 0, 0);
++
++    SDL_SetAtomicInt(&s_vpad_rumble[v].calls, 0);
++    SDL_SetAtomicInt(&s_vpad_rumble[v].nonzero, 0);
++    SDL_SetAtomicInt(&s_vpad_rumble[v].last, 0);
++
++    if (!SDL_GetAtomicInt(&s_vpad_rumble[v].probe_seen))
+         OPL_ERROR_F("input",
+-                    "virtual pad rumble recorder is NOT live — the probe pair "
+-                    "never reached the callback, so a zero motor count from "
+-                    "this run proves nothing");
++                    "virtual pad %d rumble recorder is NOT live — the probe "
++                    "pair never reached the callback, so a zero motor count "
++                    "from this run proves nothing", v);
+     else
+-        OPL_INFO_F("input", "virtual pad rumble recorder live (self-probe ok)");
++        OPL_INFO_F("input", "virtual pad %d rumble recorder live (self-probe ok)",
++                   v);
+ }
+ 
+ /* Drive the virtual pad from the same frame-indexed pattern the synthetic
+@@ -774,6 +805,16 @@ static SDL_Gamepad* host_first_gamepad(void)
+ #define HOST_OWNED_PADS 8
+ static struct { SDL_JoystickID id; SDL_Gamepad* gp; } s_owned[HOST_OWNED_PADS];
+ 
++/* Each slot's device, as an instance id, for readers on other threads. See
++ * openpete_host_input_slot_device_id. */
++static SDL_AtomicInt s_slot_dev_id[OPENPETE_PAD_SLOTS];
++
++unsigned openpete_host_input_slot_device_id(int slot)
++{
++    if (slot < 1 || slot >= OPENPETE_PAD_SLOTS) return 0u;
++    return (unsigned)SDL_GetAtomicInt(&s_slot_dev_id[slot]);
++}
++
+ /* Resolve a device to a gamepad handle, opening it if nothing else has. */
+ static SDL_Gamepad* host_gamepad_for_id(SDL_JoystickID id)
+ {
+@@ -1208,6 +1249,13 @@ void openpete_host_input_sample(bool alt_held)
+             memcpy(d->axes, sa, sizeof(d->axes));
+             d->valid = true;
+         }
++        /* Publish each slot's device id for the rumble pump, which runs on
++         * another thread and must not hold one of these handles across a
++         * prune. Published for an empty slot too (as 0), so a pad going away
++         * silences its slot instead of leaving the last id standing. */
++        for (int sl = 1; sl < OPENPETE_PAD_SLOTS; sl++)
++            SDL_SetAtomicInt(&s_slot_dev_id[sl],
++                             slot_gp[sl] ? (int)SDL_GetGamepadID(slot_gp[sl]) : 0);
+     }
+ 
+     const int64_t now_ns = (int64_t)op_now();
+diff --git a/core/input/host_rumble.c b/core/input/host_rumble.c
+index 546ada8c..342be650 100644
+--- a/core/input/host_rumble.c
++++ b/core/input/host_rumble.c
+@@ -18,6 +18,7 @@
+  */
+ 
+ #include "openpete_rumble.h"
++#include "openpete_input_log.h"   /* OPENPETE_PAD_SLOTS */
+ #include "openpete_log.h"
+ 
+ #include <SDL3/SDL.h>
+@@ -36,6 +37,11 @@ extern void* PsyX_Pad_GetGamepad(int slot);
+  * to keep this TU's include surface to SDL + our own header. */
+ extern int openpete_speculative;
+ 
++/* The device driving pad slot 1..3, as an SDL instance id (host_input.c).
++ * Declared for the same reason: an id, not a handle, because those handles are
++ * opened and pruned on the sampling thread while this file runs on the pump. */
++extern unsigned openpete_host_input_slot_device_id(int slot);
++
+ /* Only slot 0 is wired: Spyro registers one actuator buffer, for player one,
+  * and a second slot has nothing to drive. The array exists so a game that
+  * registers slot 1 records the fact instead of silently aliasing slot 0. */
+@@ -61,13 +67,29 @@ static SDL_AtomicInt s_pair;
+  * only instrument that can observe this path at all, and the vibration oracle
+  * would be reduced to testing a mock of the code instead of the code.
+  *
+- * So the refusals are lifted for exactly one device: the virtual pad the
+- * harness attached, identified by instance id and re-checked against the
+- * handle actually being driven. If a real controller is also plugged in and
+- * has taken slot 0, the id will not match and the normal gates apply — a
+- * diagnostic run must not buzz a pad on the desk just because a test flag is
+- * set. Stored as id+1 so zero means "no test device". */
+-static SDL_AtomicInt s_test_device;
++ * So the refusals are lifted for exactly the devices the harness attached:
++ * virtual pads, identified by instance id and re-checked against the handle
++ * actually being driven. If a real controller is also plugged in and has taken
++ * a slot, its id is not in the set and the normal gates apply — a diagnostic
++ * run must not buzz a pad on the desk just because a test flag is set.
++ *
++ * A set rather than one id, because the harness attaches one pad per slot and
++ * a per-slot claim is only observable when every one of them can be driven.
++ * Each entry is stored as id+1 so zero means "empty". */
++static SDL_AtomicInt s_test_device[OPENPETE_PAD_SLOTS];
++
++/* Mod-driven motor pairs for slots 1..OPENPETE_PAD_SLOTS-1, packed the same
++ * way as s_pair: low 16 bits the large motor, high 16 the small. Written by
++ * the sim thread through openpete_rumble_mod_set, read by the pump. Index 0 is
++ * never used: slot 0 is the game's own actuator table. */
++static SDL_AtomicInt s_mod_pair[OPENPETE_PAD_SLOTS];
++static SDL_AtomicInt s_mod_commands[OPENPETE_PAD_SLOTS];
++
++/* Set by the first publish for a slot and never cleared: a slot no mod has
++ * ever driven is left alone entirely, so its command count stays a count of
++ * what a mod asked for. Clearing stays armed, because the stop has to reach
++ * the device. */
++static SDL_AtomicInt s_mod_armed[OPENPETE_PAD_SLOTS];
+ 
+ /* Gates. All are pump-thread reads; the setters are called from wherever the
+  * corresponding state changes, and each is a single int, so no locking. */
+@@ -192,13 +214,58 @@ static void rumble_drive(uint16_t low, uint16_t high)
+     SDL_SetAtomicInt(&s_last_pair, (int)(((uint32_t)high << 16) | (uint32_t)low));
+ }
+ 
+-/* True when the pad we would drive is the harness's own virtual device. */
++/* True when the pad we would drive is one of the harness's virtual devices. */
+ static int driving_test_device(SDL_Gamepad* gp)
+ {
+-    int stored = SDL_GetAtomicInt(&s_test_device);
+-    if (!stored || !gp)
+-        return 0;
+-    return (int)SDL_GetGamepadID(gp) == stored - 1;
++    if (!gp) return 0;
++    const int id = (int)SDL_GetGamepadID(gp);
++    for (int i = 0; i < OPENPETE_PAD_SLOTS; i++) {
++        int stored = SDL_GetAtomicInt(&s_test_device[i]);
++        if (stored && stored - 1 == id) return 1;
++    }
++    return 0;
++}
++
++/* The refusals shared by every slot: headless and focus protect a human's
++ * controller and are lifted for a harness device, pause silences everything.
++ * Returns 1 when this pad must stay silent this iteration. */
++static int rumble_gates_block(SDL_Gamepad* gp)
++{
++    if (!driving_test_device(gp)) {
++        if (SDL_GetAtomicInt(&s_headless))
++            return 1;
++        if (!SDL_GetKeyboardFocus())
++            return 1;
++    }
++    return SDL_GetAtomicInt(&s_paused) ? 1 : 0;
++}
++
++/* Drive one mod-published slot against the device currently holding it.
++ *
++ * The id is resolved here, at drive time, rather than held: a device pruned
++ * between the sampling thread's publish and this call reads as a NULL, not as
++ * a use-after-close. */
++static void rumble_apply_mod_slot(int slot)
++{
++    if (!SDL_GetAtomicInt(&s_mod_armed[slot])) return;
++    const unsigned id = openpete_host_input_slot_device_id(slot);
++    if (!id) return;
++    SDL_Gamepad* gp = SDL_GetGamepadFromID((SDL_JoystickID)id);
++    if (!gp) return;
++
++    const uint32_t pair = (uint32_t)SDL_GetAtomicInt(&s_mod_pair[slot]);
++    const uint16_t low  = (uint16_t)(pair & 0xFFFFu);
++    const uint16_t high = (uint16_t)(pair >> 16);
++
++    if (rumble_gates_block(gp)) {
++        /* A refusal has to reach the device, not just skip the drive: a pair
++         * published before focus was lost is still live in the driver until
++         * its expiry. */
++        SDL_RumbleGamepad(gp, 0, 0, 0);
++        return;
++    }
++    SDL_RumbleGamepad(gp, low, high, RUMBLE_DURATION_MS);
++    SDL_AddAtomicInt(&s_mod_commands[slot], 1);
+ }
+ 
+ void openpete_rumble_apply(void)
+@@ -206,29 +273,17 @@ void openpete_rumble_apply(void)
+     uint32_t pair;
+     uint16_t low, high;
+     SDL_Gamepad* gp = (SDL_Gamepad*)PsyX_Pad_GetGamepad(0);
+-    const int test_pad = driving_test_device(gp);
+ 
+-    if (!test_pad) {
+-        /* Headless is a refusal, not a default: a run with no window has no
+-         * player at the desk, and every gate battery and scripted capture is
+-         * one. */
+-        if (SDL_GetAtomicInt(&s_headless))
+-            return;
+-
+-        /* Focus gates the motors. This is the layer that protects a human from
+-         * a background window buzzing a pad on their desk — a script-launched
+-         * build, a capture running behind the editor — whatever the config
+-         * says. Polled rather than tracked through FOCUS_LOST / FOCUS_GAINED
+-         * events so there is no state to get out of step with reality: if no
+-         * window of ours holds keyboard focus right now, the motors are silent
+-         * right now. */
+-        if (!SDL_GetKeyboardFocus()) {
+-            openpete_rumble_stop();
+-            return;
+-        }
+-    }
++    for (int slot = 1; slot < OPENPETE_PAD_SLOTS; slot++)
++        rumble_apply_mod_slot(slot);
+ 
+-    if (SDL_GetAtomicInt(&s_paused)) {
++    /* Headless, focus and pause: see rumble_gates_block. Headless is a
++     * refusal, not a default — a run with no window has no player at the desk,
++     * and every gate battery and scripted capture is one. Focus is the layer
++     * that protects a human from a background window buzzing a pad on their
++     * desk, polled rather than tracked through FOCUS_LOST / FOCUS_GAINED so
++     * there is no state to get out of step with reality. */
++    if (rumble_gates_block(gp)) {
+         openpete_rumble_stop();
+         return;
+     }
+@@ -242,6 +297,49 @@ void openpete_rumble_apply(void)
+     rumble_drive(low, high);
+ }
+ 
++/* ---- mod-driven slots ---------------------------------------------------- */
++
++void openpete_rumble_mod_set(int slot, int small_byte, int large_byte)
++{
++    if (slot < 1 || slot >= OPENPETE_PAD_SLOTS)
++        return;
++
++    const int strength = openpete_rumble_get_strength();
++    const uint16_t low  = openpete_rumble_motor_u16(large_byte, /*is_small=*/0,
++                                                    strength);
++    const uint16_t high = openpete_rumble_motor_u16(small_byte, /*is_small=*/1,
++                                                    strength);
++    SDL_SetAtomicInt(&s_mod_pair[slot],
++                     (int)(((uint32_t)high << 16) | (uint32_t)low));
++    SDL_SetAtomicInt(&s_mod_armed[slot], 1);
++
++    if (rumble_log_on())
++        OPL_INFO_F("rumble", "mod slot %d pair: bytes {%d, %d} -> "
++                   "{low %u, high %u}", slot, small_byte, large_byte,
++                   (unsigned)low, (unsigned)high);
++}
++
++void openpete_rumble_mod_clear(int slot)
++{
++    if (slot < 1 || slot >= OPENPETE_PAD_SLOTS)
++        return;
++    SDL_SetAtomicInt(&s_mod_pair[slot], 0);
++}
++
++unsigned openpete_rumble_mod_commands(int slot)
++{
++    if (slot < 1 || slot >= OPENPETE_PAD_SLOTS) return 0u;
++    return (unsigned)SDL_GetAtomicInt(&s_mod_commands[slot]);
++}
++
++void openpete_rumble_mod_pair(int slot, uint16_t* low, uint16_t* high)
++{
++    uint32_t p = (slot >= 1 && slot < OPENPETE_PAD_SLOTS)
++               ? (uint32_t)SDL_GetAtomicInt(&s_mod_pair[slot]) : 0u;
++    if (low)  *low  = (uint16_t)(p & 0xFFFFu);
++    if (high) *high = (uint16_t)(p >> 16);
++}
++
+ void openpete_rumble_stop(void)
+ {
+     SDL_Gamepad* gp = (SDL_Gamepad*)PsyX_Pad_GetGamepad(0);
+@@ -258,7 +356,12 @@ void openpete_rumble_stop(void)
+ 
+ void openpete_rumble_set_test_device(unsigned instance_id)
+ {
+-    SDL_SetAtomicInt(&s_test_device, (int)instance_id + 1);
++    const int want = (int)instance_id + 1;
++    for (int i = 0; i < OPENPETE_PAD_SLOTS; i++) {
++        int stored = SDL_GetAtomicInt(&s_test_device[i]);
++        if (stored == want) return;
++        if (!stored) { SDL_SetAtomicInt(&s_test_device[i], want); return; }
++    }
+ }
+ 
+ void openpete_rumble_set_headless(int headless)
+diff --git a/core/mods/mod_loader.c b/core/mods/mod_loader.c
+index b714d15c..634ec385 100644
+--- a/core/mods/mod_loader.c
++++ b/core/mods/mod_loader.c
+@@ -43,6 +43,7 @@
+ #include "openpete_fiber.h"      /* openpete_speculative / openpete_replaying */
+ #include "openpete_host_input.h"
+ #include "openpete_host_mouse.h" /* mouse_read / mouse_capture */
++#include "openpete_rumble.h"   /* pad_rumble: the one byte-to-motor path */
+ #include "openpete_keymap.h"     /* [keys.mod.<id>] binding overrides */
+ #include "game_extras.h"      /* game_get_id: [mod] game targeting */
+ #include "../ui/openpete_imgui_guard.h" /* ImGui table bind */
+@@ -211,6 +212,10 @@ struct openpete_mod {
+      * present. */
+     unsigned pad_absent_logged;
+     int      pad_present_logged;
++    /* Slots this mod has published a rumble pair for, so disabling or
++     * unloading it silences exactly those and nothing else. */
++    unsigned pad_rumble_slots;
++    int      pad_rumble_slot0_logged;
+     mod_cfg_row_t cfg_rows[MOD_CFG_ROWS_MAX]; /* [[config]] schema */
+     int   n_cfg;
+     mod_material_row_t mat_rows[MOD_MATERIAL_ROWS_MAX]; /* [[material]] */
+@@ -339,6 +344,13 @@ static void mod_strip_registrations(struct openpete_mod* mod) {
+     memset(mod->mouse_mark, 0, sizeof mod->mouse_mark);
+     mod->pad_absent_logged  = 0;
+     mod->pad_present_logged = 0;
++    /* A mod that goes away stops its motors. The pair is level-triggered, so
++     * without this the last one it published would keep being re-driven. */
++    for (int sl = 1; sl < OPENPETE_MOD_PAD_SLOTS; sl++)
++        if (mod->pad_rumble_slots & (1u << sl))
++            openpete_rumble_mod_clear(sl);
++    mod->pad_rumble_slots = 0;
++    mod->pad_rumble_slot0_logged = 0;
+     openpete_mods_chain_remove_owner(mod->id);
+     openpete_mods_draw_remove_owner(mod->id);
+     openpete_mods_registry_remove_owner(mod->id);
+@@ -1523,6 +1535,37 @@ static int api_pad_read(openpete_mod_t* self, uint32_t slot,
+     return 0;
+ }
+ 
++static int api_pad_rumble(openpete_mod_t* self, uint32_t slot,
++                          uint32_t small_byte, uint32_t large_byte) {
++    if (!self) return -1;
++    if (slot == 0) {
++        if (!self->pad_rumble_slot0_logged) {
++            self->pad_rumble_slot0_logged = 1;
++            OPL_ERROR_F(self->log_tag, "pad_rumble: slot 0 is the game's own "
++                        "actuator table — a second writer would fight it; "
++                        "drive slots 1..%d", OPENPETE_MOD_PAD_SLOTS - 1);
++        }
++        return -1;
++    }
++    if (slot >= (uint32_t)OPENPETE_MOD_PAD_SLOTS) {
++        OPL_ERROR_F(self->log_tag, "pad_rumble: slot %u out of range (1..%d)",
++                    slot, OPENPETE_MOD_PAD_SLOTS - 1);
++        return -1;
++    }
++    if (purity_violation("pad_rumble")) return -1;
++    /* A speculative tick's timeline is one the player never lived, and a
++     * rewind burst re-executes tens of ticks at burst speed: replaying the
++     * motors for either is a side effect escaping the re-execution, exactly
++     * like audio. The call is accepted and does nothing, so a mod driving
++     * rumble from a tick hook needs no speculation test of its own. */
++    if (openpete_speculative || openpete_replaying) return 0;
++
++    self->pad_rumble_slots |= 1u << slot;
++    openpete_rumble_mod_set((int)slot, (int)(small_byte & 0xFFu),
++                            (int)(large_byte & 0xFFu));
++    return 0;
++}
++
+ /* Register a parsed manifest's [[binding]] keys with the keymap under the
+  * mod.<id> domain. Runs for every discovered mod at init and again for
+  * the --keys-report path, which prints before any mod loads. */
+@@ -1665,6 +1708,7 @@ static const openpete_mod_api_t s_api = {
+     .mouse_capture = api_mouse_capture,
+     /* pillar 9: the host pads (api 12) */
+     .pad_read      = api_pad_read,
++    .pad_rumble    = api_pad_rumble,
+     /* declared input bindings */
+     .binding_down  = api_binding_down,
+     /* pillar 9: game data + texture packs (api 2) */
+diff --git a/core/runtime/run.c b/core/runtime/run.c
+index e5ecdb92..1556ea82 100644
+--- a/core/runtime/run.c
++++ b/core/runtime/run.c
+@@ -2629,6 +2629,60 @@ static uint16_t s_p1_stage_first_read_bits = 0;
+ static unsigned char s_p1_stage_first_staged_axes[4] = {0};
+ static unsigned char s_p1_stage_first_read_axes[4] = {0};
+ 
++static void rumble_census_report(void) {
++    /* Vibration census. Emitted unconditionally because the numbers only mean
++     * something together, and every one of them is a zero in some legitimate
++     * configuration:
++     *
++     *   registered/nonzero  the diagnosis. libpad's PadSetAct is a
++     *                       registration, so the expected reading is a small
++     *                       number of calls all carrying {0,0} — a NON-zero
++     *                       registration would mean the game got its buffer
++     *                       filled before handing it over, and the one-shot
++     *                       reading of PadSetAct was not the whole story.
++     *   commands            SDL rumble calls issued. Zero is correct headless,
++     *                       unfocused, at --vibration 0, or with no pad.
++     *   recorder            the virtual-pad oracle: `live` says the self-probe
++     *                       arrived, and without that a zero motor count is
++     *                       indistinguishable from a recorder that was never
++     *                       wired. Never read the counts without it. */
++    {
++        uint16_t low = 0, high = 0;
++        openpete_rumble_last_pair(&low, &high);
++        OPL_INFO_F("rumble",
++                   "census: PadSetAct %u call(s), %u carrying non-zero bytes; "
++                   "%u motor command(s) issued, last pair {low %u, high %u}",
++                   openpete_rumble_register_calls(),
++                   openpete_rumble_register_nonzero(),
++                   openpete_rumble_commands(), (unsigned)low, (unsigned)high);
++        /* Per virtual pad, because "which device received it" is the claim a
++         * per-slot actuator path has to answer and a total cannot. */
++        for (int v = 0; v < OPENPETE_PAD_SLOTS; v++) {
++            if (!openpete_host_input_vpad_rumble_calls(v) &&
++                !openpete_host_input_vpad_rumble_live(v))
++                continue;
++            unsigned vlow = 0, vhigh = 0;
++            openpete_host_input_vpad_rumble_last(v, &vlow, &vhigh);
++            OPL_INFO_F("rumble",
++                       "recorder: pad %d live=%d, %d callback(s), %d non-zero, "
++                       "last pair {low %u, high %u}", v,
++                       openpete_host_input_vpad_rumble_live(v),
++                       openpete_host_input_vpad_rumble_calls(v),
++                       openpete_host_input_vpad_rumble_nonzero(v),
++                       vlow, vhigh);
++        }
++        for (int sl = 1; sl < OPENPETE_PAD_SLOTS; sl++) {
++            if (!openpete_rumble_mod_commands(sl)) continue;
++            uint16_t mlow = 0, mhigh = 0;
++            openpete_rumble_mod_pair(sl, &mlow, &mhigh);
++            OPL_INFO_F("rumble",
++                       "mod slot %d: %u motor command(s), pair {low %u, high %u}",
++                       sl, openpete_rumble_mod_commands(sl),
++                       (unsigned)mlow, (unsigned)mhigh);
++        }
++    }
++}
++
+ static int run_host_loop(const openpete_options_t* opts) {
+     /* Which half of the input seam this thread owns (see run_host_init). */
+     const bool split = openpete_split_applies(opts);
+@@ -6128,40 +6182,7 @@ static int run_host_loop(const openpete_options_t* opts) {
+                     s_p1_stage_first_read_axes[0], s_p1_stage_first_read_axes[1],
+                     s_p1_stage_first_read_axes[2], s_p1_stage_first_read_axes[3]);
+ 
+-    /* Vibration census. Emitted unconditionally because the numbers only mean
+-     * something together, and every one of them is a zero in some legitimate
+-     * configuration:
+-     *
+-     *   registered/nonzero  the diagnosis. libpad's PadSetAct is a
+-     *                       registration, so the expected reading is a small
+-     *                       number of calls all carrying {0,0} — a NON-zero
+-     *                       registration would mean the game got its buffer
+-     *                       filled before handing it over, and the one-shot
+-     *                       reading of PadSetAct was not the whole story.
+-     *   commands            SDL rumble calls issued. Zero is correct headless,
+-     *                       unfocused, at --vibration 0, or with no pad.
+-     *   recorder            the virtual-pad oracle: `live` says the self-probe
+-     *                       arrived, and without that a zero motor count is
+-     *                       indistinguishable from a recorder that was never
+-     *                       wired. Never read the counts without it. */
+-    {
+-        uint16_t low = 0, high = 0;
+-        openpete_rumble_last_pair(&low, &high);
+-        OPL_INFO_F("rumble",
+-                   "census: PadSetAct %u call(s), %u carrying non-zero bytes; "
+-                   "%u motor command(s) issued, last pair {low %u, high %u}",
+-                   openpete_rumble_register_calls(),
+-                   openpete_rumble_register_nonzero(),
+-                   openpete_rumble_commands(), (unsigned)low, (unsigned)high);
+-        if (openpete_host_input_vpad_rumble_calls() ||
+-            openpete_host_input_vpad_rumble_live()) {
+-            OPL_INFO_F("rumble",
+-                       "recorder: live=%d, %d callback(s), %d non-zero",
+-                       openpete_host_input_vpad_rumble_live(),
+-                       openpete_host_input_vpad_rumble_calls(),
+-                       openpete_host_input_vpad_rumble_nonzero());
+-        }
+-    }
++    rumble_census_report();
+ 
+     /* Whether the guest's own execution ever reached the Vulkan device. A
+      * present thread can only run concurrently with a tick if this is zero;
+diff --git a/docs/modding/pages/code.md b/docs/modding/pages/code.md
+index c765f9dd..52ef45b7 100644
+--- a/docs/modding/pages/code.md
++++ b/docs/modding/pages/code.md
+@@ -162,6 +162,7 @@ mod that wrote guest bytes restores the stock bytes on `on = 0`.
+ | Read a hotkey | `[[binding]]` rows with `binding_down` | No; acting on it in a tick hook diverges gameplay from a replay |
+ | Read the mouse | `mouse_read` (position, buttons, per-hook-kind deltas), `mouse_capture` for relative mode | No; same replay caveat in a tick hook |
+ | Read another player's pad | `pad_read` | No; the record is the tick's own, so a tick-hook read replays |
++| Drive another player's rumble | `pad_rumble` (libpad actuator bytes; slot 0 refused) | No; inert while speculating or replaying |
+ | Post-process the frame | `shader_register` with `postfx_*` | No |
+ | Re-shade what the engine draws | `[[material]]` rows or `material_register` | No |
+ | Read another level's data | `read_level_data` | No |
+-- 
+2.54.0 (Apple Git-157)
+

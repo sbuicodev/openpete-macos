@@ -1,0 +1,128 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: Tyson Cleary <tyscorp@gmail.com>
+Date: Mon, 21 Sep 2026 10:10:02 -0500
+Subject: [PATCH] mods: disc_path names the disc image the engine opened (api
+ 12)
+
+api->disc_path(self, want_bin) returns the cue the engine booted from
+or its resolved bin, captured at mods init after the library, the
+splash drop and --ingest have written opts->disc_path; NULL with no
+disc. Correct in every layout, including a --disc boot no library
+entry describes. Appended after pad_read so no member moves.
+
+(cherry picked from commit 9100d54d16610cf8e7b2d990b44c36974f223bd2)
+---
+ core/include/openpete_mod_api.h | 21 +++++++++++++++++++++
+ core/mods/mod_loader.c          | 30 ++++++++++++++++++++++++++++++
+ docs/modding/pages/code.md      |  1 +
+ 3 files changed, 52 insertions(+)
+
+diff --git a/core/include/openpete_mod_api.h b/core/include/openpete_mod_api.h
+index 2a448539..8c221f9f 100644
+--- a/core/include/openpete_mod_api.h
++++ b/core/include/openpete_mod_api.h
+@@ -981,6 +981,27 @@ typedef struct openpete_mod_api {
+     int (*pad_rumble)(openpete_mod_t* self, uint32_t slot,
+                       uint32_t small_byte, uint32_t large_byte);
+     /** @} */
++
++    /** @name Disc
++     * @{ */
++    /**
++     * @brief The disc image this session booted, or NULL when none is open.
++     *
++     * The path the engine itself opened, so it is correct in every layout:
++     * an explicit `--disc`, a library entry picked in the splash, an
++     * ingested image, portable or user data directory. A mod that reads
++     * sectors wants @p want_bin: the cue names no sectors.
++     *
++     * The string is owned by the engine and stays valid for the session.
++     * Legal from any context.
++     * @param want_bin Non-zero for the sector image (`.bin`), zero for the
++     *                 path as given (the `.cue` where one was named).
++     * @return The path, or NULL when no disc is open or the sector image
++     *         behind the cue cannot be resolved.
++     * @since api 12
++     */
++    const char* (*disc_path)(openpete_mod_t* self, int want_bin);
++    /** @} */
+ } openpete_mod_api_t;
+ 
+ /**
+diff --git a/core/mods/mod_loader.c b/core/mods/mod_loader.c
+index 634ec385..6f5b2d8b 100644
+--- a/core/mods/mod_loader.c
++++ b/core/mods/mod_loader.c
+@@ -37,6 +37,7 @@
+ #include "openpete_osd.h"
+ #include "../host/texture_pack.h"   /* texpack_fog_shift */
+ #include "openpete_input_log.h"
++#include "openpete_psx.h"   /* openpete_psx_resolve_disc_bin */
+ #include "openpete_mod_api.h"
+ #include "openpete_mod_ui.h"
+ #include "openpete_log.h"
+@@ -715,6 +716,31 @@ static const char* api_data_dir(openpete_mod_t* self) {
+     return self->data_dir;
+ }
+ 
++/* The disc image the engine opened, captured once the library has had its
++ * chance to fill opts->disc_path. The sector image behind a cue is resolved
++ * on first demand and kept, since the resolver touches the filesystem. */
++static char s_disc_path[MOD_PATH_MAX];
++static char s_disc_bin[MOD_PATH_MAX];
++static int  s_disc_bin_state; /* 0 unresolved, 1 resolved, -1 unresolvable */
++
++/* Called once mods load: the library, the splash drop and --ingest have all
++ * written opts->disc_path by then, so the boot path is final. */
++static void mods_capture_disc_path(const openpete_options_t* opts) {
++    const char* p = (opts && opts->disc_path) ? opts->disc_path : "";
++    snprintf(s_disc_path, sizeof s_disc_path, "%s", p);
++    s_disc_bin_state = 0;
++}
++
++static const char* api_disc_path(openpete_mod_t* self, int want_bin) {
++    if (!self || !s_disc_path[0]) return NULL;
++    if (!want_bin) return s_disc_path;
++    if (s_disc_bin_state == 0)
++        s_disc_bin_state = openpete_psx_resolve_disc_bin(
++                               s_disc_path, s_disc_bin, sizeof s_disc_bin,
++                               NULL, 0) == 0 ? 1 : -1;
++    return s_disc_bin_state > 0 ? s_disc_bin : NULL;
++}
++
+ static int api_host_key_down(const char* key_name) {
+     if (!key_name) return 0;
+     SDL_Scancode sc = SDL_GetScancodeFromName(key_name);
+@@ -1709,6 +1735,8 @@ static const openpete_mod_api_t s_api = {
+     /* pillar 9: the host pads (api 12) */
+     .pad_read      = api_pad_read,
+     .pad_rumble    = api_pad_rumble,
++    /* pillar 9: the booted disc (api 12) */
++    .disc_path     = api_disc_path,
+     /* declared input bindings */
+     .binding_down  = api_binding_down,
+     /* pillar 9: game data + texture packs (api 2) */
+@@ -3436,6 +3464,8 @@ int openpete_mods_init(const openpete_options_t* opts) {
+     s_native_hides_psx = opts && opts->renderer == OPENPETE_RENDERER_VK
+                               && !opts->headless;
+ 
++    mods_capture_disc_path(opts);
++
+     char mods_dir[MOD_PATH_MAX];
+     mod_ref_t refs[MODS_MAX];
+     int n_refs = mods_discover(opts, mods_dir, sizeof mods_dir, refs,
+diff --git a/docs/modding/pages/code.md b/docs/modding/pages/code.md
+index 52ef45b7..28bcf9f5 100644
+--- a/docs/modding/pages/code.md
++++ b/docs/modding/pages/code.md
+@@ -168,6 +168,7 @@ mod that wrote guest bytes restores the stock bytes on `on = 0`.
+ | Read another level's data | `read_level_data` | No |
+ | Re-target texture-pack fog | `texpack_fog_shift` | No |
+ | Persistent files | `data_dir` | No |
++| Find the booted disc image | `disc_path` (the path the engine opened, in any layout) | No |
+ 
+ **`ui_status` or `notify`.** `ui_status` reports state: lines in the mod's
+ block of the Mods section, visible while that overlay is open, repainted
+-- 
+2.54.0 (Apple Git-157)
+

@@ -1,7 +1,7 @@
-From 204cc6ae8c51fe315a3fb7b3d8883c6b23bceab9 Mon Sep 17 00:00:00 2001
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
 From: Stefano Buico <stefano.buico@gmail.com>
 Date: Wed, 25 Nov 2026 21:12:01 +0100
-Subject: [PATCH 3/7] runtime: no clock_nanosleep on macOS
+Subject: [PATCH] runtime: no clock_nanosleep on macOS
 
 ---
  core/runtime/openpete_time.c | 2 +-

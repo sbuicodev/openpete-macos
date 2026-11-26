@@ -1,8 +1,7 @@
-From 035304fbfeff092568620ee0a8acd0d9b08ed005 Mon Sep 17 00:00:00 2001
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
 From: Stefano Buico <stefano.buico@gmail.com>
 Date: Wed, 25 Nov 2026 21:12:01 +0100
-Subject: [PATCH 1/7] psxrecomp: rename colliding BasicBlock (ODR crash on
- macOS)
+Subject: [PATCH] psxrecomp: rename colliding BasicBlock (ODR crash on macOS)
 
 ---
  .../psxrecomp/recompiler/include/basic_block.h     | 12 ++++++------

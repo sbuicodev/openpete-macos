@@ -64,12 +64,15 @@ cp -R "$B/recomp/manifest" "$B/recomp/src" "$R/recomp/"
 python3 scripts/strip-comments.py "$R"/recomp/src/*
 cp "$B/recomp/tools/PSXRecomp" "$R/recomp/tools/"
 cp -R "$B/assets" "$R/"
+cp -R "$B/sdk" "$R/"   # mod SDK: the loader compiles code mods against it
 cp gamecontrollerdb.txt "$R/"
 cp docs/openpete-dist.toml "$R/openpete.toml"
 cp LICENSE NOTICE.md "$R/"
 cp "$BREW/opt/openal-soft/COPYING" "$R/licences/OpenAL-Soft-COPYING.txt"
 cp "$BREW/opt/molten-vk/LICENSE" "$R/licences/MoltenVK-LICENSE.txt"
 cp third_party/psxrecomp/LICENSE "$R/licences/PSXRecomp-LICENSE.txt"
+cp third_party/imgui/LICENSE.txt "$R/licences/DearImGui-LICENSE.txt"
+cp third_party/dear_bindings/LICENSE.txt "$R/licences/dear_bindings-LICENSE.txt"
 
 say "Icon"
 ICONSET="$(mktemp -d)/OpenPete.iconset"

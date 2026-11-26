@@ -1,0 +1,325 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: Tyson Cleary <tyscorp@gmail.com>
+Date: Mon, 21 Sep 2026 07:55:30 -0500
+Subject: [PATCH] mods: pad_read serves a tick's input-log record per pad slot
+ (api 12)
+
+The staged input-log record carries its VBL stamp as a parameter of
+input_log_stage_reset, read back with input_log_staged_vbl. pad_read
+fills openpete_mod_pad_t (slot, vbl, present, buttons, axes, libpad[8]
+with the low button byte first) from that record, identical under live,
+replay, rewind and runahead; an absent slot reads the canonical empty
+port; a present-context call returns -1 and logs once per mod. Entry
+appended after mouse_capture so no existing member moves. Docs: the
+code.md capability row; api.md regenerates from the header.
+
+(cherry picked from commit 41dcfcf5e5f5008630ef932dbce9a619e65fb1b2)
+---
+ core/include/openpete_input_log.h | 12 ++++--
+ core/include/openpete_mod_api.h   | 66 +++++++++++++++++++++++++++++
+ core/input/input_log.c            |  8 +++-
+ core/mods/mod_loader.c            | 70 +++++++++++++++++++++++++++++++
+ core/runtime/run.c                |  4 +-
+ docs/modding/pages/code.md        |  1 +
+ 6 files changed, 154 insertions(+), 7 deletions(-)
+
+diff --git a/core/include/openpete_input_log.h b/core/include/openpete_input_log.h
+index e8f0e98e..43a05dc3 100644
+--- a/core/include/openpete_input_log.h
++++ b/core/include/openpete_input_log.h
+@@ -70,9 +70,10 @@ void input_port_clear(openpete_input_port_t* p);
+  * already stamped by then. The value the log stores for slot 0 is still the
+  * post-yield guest readback, unchanged: staging only publishes it early. */
+ 
+-/* Reset the staged record to four empty ports. Once per host iteration,
+- * before any port is staged. */
+-void input_log_stage_reset(void);
++/* Reset the staged record to four empty ports and stamp the VBL the tick
++ * about to run carries. Once per host iteration, before any port is staged;
++ * the rewind burst calls it again per replayed tick with that tick's VBL. */
++void input_log_stage_reset(unsigned vbl);
+ 
+ /* Fill one staged port and mark it present. No-op for an out-of-range slot. */
+ void input_log_stage_port(int slot, uint16_t bits, const uint8_t axes[4]);
+@@ -84,6 +85,11 @@ void input_log_stage_p1_readback(uint16_t bits, const uint8_t axes[4]);
+ /* The staged record. Never NULL. */
+ const openpete_input_rec_t* input_log_staged(void);
+ 
++/* The VBL the staged record was stamped with. A tick re-executed under
++ * runahead speculation reads the record staged for the last committed tick,
++ * so this is that tick's VBL, not the speculative one. */
++unsigned input_log_staged_vbl(void);
++
+ /* Append the staged record as one VBL. Returns the entry's index, or -1 on
+  * allocation failure (logged; the log stops growing but never crashes the
+  * run). */
+diff --git a/core/include/openpete_mod_api.h b/core/include/openpete_mod_api.h
+index a4b2064c..4730ab32 100644
+--- a/core/include/openpete_mod_api.h
++++ b/core/include/openpete_mod_api.h
+@@ -90,6 +90,41 @@ typedef struct openpete_mod_mouse {
+     uint8_t  reserved_;
+ } openpete_mod_mouse_t;
+ 
++/** @brief Pad slots openpete_mod_api::pad_read serves: 0 is player 1. */
++#define OPENPETE_MOD_PAD_SLOTS 4
++
++/**
++ * @brief One pad slot as read by openpete_mod_api::pad_read.
++ *
++ * Set `struct_size` to `sizeof(openpete_mod_pad_t)` before the call; the
++ * engine refuses any other size. The bytes come from the input-log record
++ * staged for the tick that is running, the record the log stores for that
++ * tick, so the same read returns the same bytes under live play, bk2
++ * replay, the rewind burst and runahead speculation.
++ *
++ * `vbl` is the VBL index that record was staged for. A speculative tick
++ * re-executes on the last committed tick's record — held input, the same
++ * prediction player 1 gets — and carries that tick's `vbl`. `buttons` is
++ * the PSX pad bitfield, 1 = released. `axes` is LX, LY, RX, RY with 128
++ * centred. `libpad` is the eight bytes libpad reports in a PADRAW buffer:
++ * `00, 73`, low button byte, high button byte, RX, RY, LX, LY.
++ *
++ * An absent slot (`present` 0) is the canonical empty port rather than a
++ * derivation: `buttons` 0xFFFF, axes centred, `libpad` `FF 00 00 00 00 00
++ * 00 00`, what libpad reports for a port with no controller in it, so a
++ * mod that copies `libpad` into a pad buffer of its own behaves as
++ * hardware with nothing plugged in.
++ */
++typedef struct openpete_mod_pad {
++    uint32_t struct_size; /**< sizeof(openpete_mod_pad_t) at the mod's compile time. */
++    uint32_t slot;        /**< The slot read, 0..#OPENPETE_MOD_PAD_SLOTS-1. */
++    uint32_t vbl;         /**< VBL index the record was staged for. */
++    uint32_t present;     /**< 1 = a device drove this slot at that VBL. */
++    uint32_t buttons;     /**< PSX pad bitfield; 1 = released. */
++    uint8_t  axes[4];     /**< LX, LY, RX, RY; 128 = centre. */
++    uint8_t  libpad[8];   /**< The slot as a libpad PADRAW buffer. */
++} openpete_mod_pad_t;
++
+ /** @brief Context handed to a present hook (openpete_mod_api::register_present_hook). */
+ typedef struct openpete_present_ctx {
+     uint32_t tick;   /**< Sim tick counter. */
+@@ -872,6 +907,37 @@ typedef struct openpete_mod_api {
+      */
+     int (*mouse_capture)(openpete_mod_t* self, int on);
+     /** @} */
++
++    /** @name Pads
++     * @{ */
++    /**
++     * @brief Read one pad slot's bytes for the tick being executed.
++     *
++     * Slot 0 is player 1, the slot the retail game reads. Slots 1-3 are
++     * host-only: nothing writes them into guest RAM, so a mod that wants
++     * extra players decodes `libpad` into a pad buffer it allocates
++     * itself. The source is the input-log record staged for this tick, so
++     * the read reproduces under bk2 replay and under the rewind burst,
++     * which restages every slot from the log. A speculative runahead tick
++     * reads the last committed tick's record and reports that tick's
++     * `vbl`.
++     *
++     * A slot with no device assigned reads as the canonical empty port and
++     * is reported once per mod in the log. A bk2 movie carries two
++     * players, so slots 2 and 3 read absent on any replay.
++     *
++     * Tick hooks only: a present hook is refused (reported once per mod),
++     * because the staged record belongs to the sim thread. Read in a tick
++     * hook and display from your own copy.
++     * @param slot 0..#OPENPETE_MOD_PAD_SLOTS-1.
++     * @param out  `out->struct_size` must be `sizeof(openpete_mod_pad_t)`.
++     * @return 0, or -1 for a wrong struct_size, a slot out of range, or a
++     *         call from a present hook.
++     * @since api 12
++     */
++    int (*pad_read)(openpete_mod_t* self, uint32_t slot,
++                    openpete_mod_pad_t* out);
++    /** @} */
+ } openpete_mod_api_t;
+ 
+ /**
+diff --git a/core/input/input_log.c b/core/input/input_log.c
+index a9cffe0a..33784b74 100644
+--- a/core/input/input_log.c
++++ b/core/input/input_log.c
+@@ -13,6 +13,7 @@ static int s_alloc_failed = 0;
+ 
+ /* The record for the tick about to run; see the staging note in the header. */
+ static openpete_input_rec_t s_staged;
++static unsigned s_staged_vbl;
+ 
+ void input_port_clear(openpete_input_port_t* p) {
+     p->bits = 0xFFFF;
+@@ -20,9 +21,10 @@ void input_port_clear(openpete_input_port_t* p) {
+     p->present = 0;
+ }
+ 
+-void input_log_stage_reset(void) {
++void input_log_stage_reset(unsigned vbl) {
+     for (int i = 0; i < OPENPETE_PAD_SLOTS; i++)
+         input_port_clear(&s_staged.port[i]);
++    s_staged_vbl = vbl;
+ }
+ 
+ void input_log_stage_port(int slot, uint16_t bits, const uint8_t axes[4]) {
+@@ -44,6 +46,8 @@ void input_log_stage_p1_readback(uint16_t bits, const uint8_t axes[4]) {
+ 
+ const openpete_input_rec_t* input_log_staged(void) { return &s_staged; }
+ 
++unsigned input_log_staged_vbl(void) { return s_staged_vbl; }
++
+ int input_log_read_slot(int slot, openpete_input_port_t* out) {
+     if (!out) return 0;
+     if (slot < 0 || slot >= OPENPETE_PAD_SLOTS) {
+@@ -91,5 +95,5 @@ void input_log_reset(void) {
+     s_log = NULL;
+     s_count = s_capacity = 0;
+     s_alloc_failed = 0;
+-    input_log_stage_reset();
++    input_log_stage_reset(0);
+ }
+diff --git a/core/mods/mod_loader.c b/core/mods/mod_loader.c
+index a37c2ad1..b714d15c 100644
+--- a/core/mods/mod_loader.c
++++ b/core/mods/mod_loader.c
+@@ -36,6 +36,7 @@
+ #include "openpete_mods.h"
+ #include "openpete_osd.h"
+ #include "../host/texture_pack.h"   /* texpack_fog_shift */
++#include "openpete_input_log.h"
+ #include "openpete_mod_api.h"
+ #include "openpete_mod_ui.h"
+ #include "openpete_log.h"
+@@ -204,6 +205,12 @@ struct openpete_mod {
+         int64_t  mx, my, wheel;
+         int      valid;
+     } mouse_mark[2];
++    /* pad_read reports its two quiet outcomes once per mod, not per tick:
++     * bit per slot for an absent slot, and one flag for a present-hook
++     * call, which an always-on UI section would otherwise repeat every
++     * present. */
++    unsigned pad_absent_logged;
++    int      pad_present_logged;
+     mod_cfg_row_t cfg_rows[MOD_CFG_ROWS_MAX]; /* [[config]] schema */
+     int   n_cfg;
+     mod_material_row_t mat_rows[MOD_MATERIAL_ROWS_MAX]; /* [[material]] */
+@@ -330,6 +337,8 @@ static int mod_check_abi(void* dl, const char* id, const char* path) {
+ static void mod_strip_registrations(struct openpete_mod* mod) {
+     openpete_host_mouse_request_capture(OPENPETE_MOUSE_CAP_MOD0 + (int)(mod - s_mods), 0);
+     memset(mod->mouse_mark, 0, sizeof mod->mouse_mark);
++    mod->pad_absent_logged  = 0;
++    mod->pad_present_logged = 0;
+     openpete_mods_chain_remove_owner(mod->id);
+     openpete_mods_draw_remove_owner(mod->id);
+     openpete_mods_registry_remove_owner(mod->id);
+@@ -1455,6 +1464,65 @@ static int api_mouse_capture(openpete_mod_t* self, int on) {
+     return 0;
+ }
+ 
++/* One pad slot for a mod (api 12), served from the input-log record staged
++ * for the running tick: the bytes the log stores for that tick, so the read
++ * reproduces wherever the record does. Slots 1-3 never reach guest RAM. */
++static int api_pad_read(openpete_mod_t* self, uint32_t slot,
++                        openpete_mod_pad_t* out) {
++    if (!self || !out) return -1;
++    if (out->struct_size != (uint32_t)sizeof(openpete_mod_pad_t)) {
++        OPL_ERROR_F(self->log_tag, "pad_read: struct_size %u, engine expects %u "
++                    "(rebuild against this SDK)", out->struct_size,
++                    (unsigned)sizeof(openpete_mod_pad_t));
++        return -1;
++    }
++    if (slot >= (uint32_t)OPENPETE_MOD_PAD_SLOTS) {
++        OPL_ERROR_F(self->log_tag, "pad_read: slot %u out of range (0..%d)",
++                    slot, OPENPETE_MOD_PAD_SLOTS - 1);
++        return -1;
++    }
++    if (openpete_mods_in_present) {
++        if (!self->pad_present_logged) {
++            self->pad_present_logged = 1;
++            OPL_ERROR_F(self->log_tag, "pad_read refused inside a present hook: "
++                        "the staged pad record belongs to the tick — read it in "
++                        "a tick hook and display from your own copy");
++        }
++        return -1;
++    }
++
++    openpete_input_port_t p;
++    input_log_read_slot((int)slot, &p);
++    memset(out, 0, sizeof *out);
++    out->struct_size = (uint32_t)sizeof(openpete_mod_pad_t);
++    out->slot    = slot;
++    out->vbl     = input_log_staged_vbl();
++    out->present = p.present ? 1u : 0u;
++    out->buttons = p.bits;
++    memcpy(out->axes, p.axes, sizeof out->axes);
++    if (p.present) {
++        /* PADRAW: no error, type 7 length 3 (digital+analog), the button
++         * word low byte first, then right stick, then left. */
++        out->libpad[0] = 0x00;
++        out->libpad[1] = 0x73;
++        out->libpad[2] = (uint8_t)(p.bits & 0xFFu);
++        out->libpad[3] = (uint8_t)(p.bits >> 8);
++        out->libpad[4] = p.axes[2];
++        out->libpad[5] = p.axes[3];
++        out->libpad[6] = p.axes[0];
++        out->libpad[7] = p.axes[1];
++    } else {
++        /* A port with nothing in it: status FF, the rest zero. */
++        out->libpad[0] = 0xFF;
++        if (!(self->pad_absent_logged & (1u << slot))) {
++            self->pad_absent_logged |= (1u << slot);
++            OPL_INFO_F(self->log_tag,
++                       "pad_read: slot %u absent — no device assigned", slot);
++        }
++    }
++    return 0;
++}
++
+ /* Register a parsed manifest's [[binding]] keys with the keymap under the
+  * mod.<id> domain. Runs for every discovered mod at init and again for
+  * the --keys-report path, which prints before any mod loads. */
+@@ -1595,6 +1663,8 @@ static const openpete_mod_api_t s_api = {
+     /* pillar 9: the host mouse (api 12) */
+     .mouse_read    = api_mouse_read,
+     .mouse_capture = api_mouse_capture,
++    /* pillar 9: the host pads (api 12) */
++    .pad_read      = api_pad_read,
+     /* declared input bindings */
+     .binding_down  = api_binding_down,
+     /* pillar 9: game data + texture packs (api 2) */
+diff --git a/core/runtime/run.c b/core/runtime/run.c
+index 0743163f..e5ecdb92 100644
+--- a/core/runtime/run.c
++++ b/core/runtime/run.c
+@@ -3719,7 +3719,7 @@ static int run_host_loop(const openpete_options_t* opts) {
+                                  * every slot exactly as the log recorded it,
+                                  * or the burst replays player 1 faithfully
+                                  * and the other players from stale bytes. */
+-                                input_log_stage_reset();
++                                input_log_stage_reset(openpete_frame);
+                                 for (int sl = 0; sl < OPENPETE_PAD_SLOTS; sl++) {
+                                     const openpete_input_port_t* pt = &r->port[sl];
+                                     if (pt->present)
+@@ -4115,7 +4115,7 @@ static int run_host_loop(const openpete_options_t* opts) {
+          * An inactive override means PsyCross decodes live inside the tick
+          * and there is nothing to stage yet; the post-yield readback below
+          * fills slot 0 in that case. */
+-        input_log_stage_reset();
++        input_log_stage_reset(openpete_frame);
+         /* Before the game calls PadInitDirect there is no pad buffer, so the
+          * post-yield readback reports PsyCross's no-buffer default rather
+          * than anything the host stamped. Staging that same default keeps
+diff --git a/docs/modding/pages/code.md b/docs/modding/pages/code.md
+index eb1c1418..c765f9dd 100644
+--- a/docs/modding/pages/code.md
++++ b/docs/modding/pages/code.md
+@@ -161,6 +161,7 @@ mod that wrote guest bytes restores the stock bytes on `on = 0`.
+ | Read player settings | `[[config]]` rows with `config_*` | No |
+ | Read a hotkey | `[[binding]]` rows with `binding_down` | No; acting on it in a tick hook diverges gameplay from a replay |
+ | Read the mouse | `mouse_read` (position, buttons, per-hook-kind deltas), `mouse_capture` for relative mode | No; same replay caveat in a tick hook |
++| Read another player's pad | `pad_read` | No; the record is the tick's own, so a tick-hook read replays |
+ | Post-process the frame | `shader_register` with `postfx_*` | No |
+ | Re-shade what the engine draws | `[[material]]` rows or `material_register` | No |
+ | Read another level's data | `read_level_data` | No |
+-- 
+2.54.0 (Apple Git-157)
+

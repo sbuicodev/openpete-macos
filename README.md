@@ -58,7 +58,7 @@ instead).
 
 The app contains **no game code or data**: just the engine, MoltenVK, OpenAL
 Soft, the recompile kit (PSXRecomp, per-overlay function-address lists, a
-six-file module source kit), a generated icon and licence texts.
+six-file module source kit), the mod SDK, a generated icon and licence texts.
 
 1. **First launch:** a splash asks for the disc image. Drag the `.cue`/`.bin`
    onto the window or the app icon, or press Space to browse.
@@ -73,6 +73,15 @@ Settings save to `~/.config/openpete/openpete.toml`; memory cards and logs
 live in `~/.local/state/openpete/`. The app is ad-hoc signed, not notarized:
 on another Mac, the first launch of a downloaded copy needs right-click →
 **Open** (or allow it under System Settings → Privacy & Security).
+
+## Mods
+
+Mod API **13**, the same version upstream OpenPete uses now: mods written for
+upstream at API 13 or earlier load here. Code mods (`src/*.c`) are compiled on
+the Mac the first time they load, with Apple's Command Line Tools, against
+the mod SDK shipped in the app; asset-only mods need nothing. Put each mod in
+its own folder under `~/.local/share/openpete/mods/`. Mods that depend on
+engine features added upstream after the pinned commit may still not work.
 
 ## How this repository works
 
@@ -107,6 +116,11 @@ and commit the updated `patches/` and `overlay/` here.
 | 0005 | rhi: build fp32 variants of the terrain shaders (Metal has no fp64) with `overlay/tools/macos/fp32_shader.py` |
 | 0006 | first launch on macOS: module link flags, Command Line Tools check, free-camera call through the dispatcher |
 | 0007 | build: `macos-arm64` and `macos-arm64-app` CMake presets |
+| 0008 | mods: `pad_read` (upstream, API 12) |
+| 0009 | mods: `pad_rumble` for players 2-4 (upstream, API 12; without its test mod and script) |
+| 0010 | mods: `disc_path` (upstream, API 12) |
+| 0011 | mods: `read_sector`, API 13 (upstream's call, implemented without upstream's disc-reader rework) |
+| 0012 | mods: compile code mods on macOS; build-time mod compile on; SDK in the `.app` |
 | psycross 0001 | arm64 primitive layout, `<stdlib.h>`, a half-float cast |
 
 Notes on the port:

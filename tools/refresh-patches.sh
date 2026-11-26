@@ -11,8 +11,8 @@ PIN="$(git -C "$ROOT" rev-parse HEAD:upstream)"
 PSY_PIN="$(git -C "$W" rev-parse "$PIN:third_party/PsyCross")"
 
 rm -f "$ROOT"/patches/openpete/*.patch "$ROOT"/patches/psycross/*.patch
-git -C "$W" format-patch --quiet "$PIN"..macos -o "$ROOT/patches/openpete"
-git -C "$W/third_party/PsyCross" format-patch --quiet "$PSY_PIN"..arm64-fixes \
+git -C "$W" format-patch --quiet --zero-commit --no-numbered "$PIN"..macos -o "$ROOT/patches/openpete"
+git -C "$W/third_party/PsyCross" format-patch --quiet --zero-commit --no-numbered "$PSY_PIN"..arm64-fixes \
     -o "$ROOT/patches/psycross"
 
 # Overlay files are new files, not patches: copy each one back.

@@ -1,7 +1,7 @@
-From f38ff0a10d8a4ccb34817ebb1c2201a530f4d3ad Mon Sep 17 00:00:00 2001
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
 From: Stefano Buico <stefano.buico@gmail.com>
 Date: Wed, 25 Nov 2026 21:12:01 +0100
-Subject: [PATCH 7/7] build: macos-arm64 / macos-arm64-app presets
+Subject: [PATCH] build: macos-arm64 / macos-arm64-app presets
 
 ---
  CMakePresets.json                   | 43 ++++++++++++++++++++++++-----

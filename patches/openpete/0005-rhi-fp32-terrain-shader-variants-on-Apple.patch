@@ -1,7 +1,7 @@
-From acf1d55305ef608aa58c770e8bbee83da9e6ba5b Mon Sep 17 00:00:00 2001
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
 From: Stefano Buico <stefano.buico@gmail.com>
 Date: Wed, 25 Nov 2026 21:12:01 +0100
-Subject: [PATCH 5/7] rhi: fp32 terrain shader variants on Apple
+Subject: [PATCH] rhi: fp32 terrain shader variants on Apple
 
 ---
  core/rhi/CMakeLists.txt | 56 ++++++++++++++++++++++++++++++++++-------

@@ -1,0 +1,107 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: Stefano Buico <stefano.buico@gmail.com>
+Date: Thu, 26 Nov 2026 01:36:28 +0100
+Subject: [PATCH] mods: read_sector reads a raw sector of the booted disc (api
+ 13)
+
+Upstream adds read_sector in 2bd41141 on top of a new disc_image reader.
+This backport reads the sector image that disc_path names, so mods built
+against api 13 load without that rework.
+---
+ core/include/openpete_mod_api.h | 16 +++++++++++++++-
+ core/mods/mod_loader.c          | 24 +++++++++++++++++++++++-
+ docs/modding/pages/code.md      |  1 +
+ 3 files changed, 39 insertions(+), 2 deletions(-)
+
+diff --git a/core/include/openpete_mod_api.h b/core/include/openpete_mod_api.h
+index 8c221f9f..65fa4552 100644
+--- a/core/include/openpete_mod_api.h
++++ b/core/include/openpete_mod_api.h
+@@ -344,7 +344,7 @@ typedef int (*openpete_mod_refine_fn)(const openpete_mod_material_key_t* key,
+                                       void* out, uint32_t cap);
+ 
+ /** @brief The api version this header describes. */
+-#define OPENPETE_MOD_API_VERSION 12u
++#define OPENPETE_MOD_API_VERSION 13u
+ 
+ /** @brief The engine's function table, passed to the mod entry point. */
+ typedef struct openpete_mod_api {
+@@ -1001,6 +1001,20 @@ typedef struct openpete_mod_api {
+      * @since api 12
+      */
+     const char* (*disc_path)(openpete_mod_t* self, int want_bin);
++    /**
++     * @brief Read one raw 2352-byte sector of the booted disc by LBA.
++     *
++     * Sector 0 is the image's first sector; a Mode 2 Form 1 sector's 2048
++     * user-data bytes start at byte 24. Read from the sector image that
++     * disc_path(self, 1) names; it never touches the disc cache's loading.
++     * Legal from any context.
++     * @param lba The sector.
++     * @param buf Receives 2352 bytes.
++     * @return 0, or -1 when no disc is open, @p buf is NULL or the sector
++     *         lies past the end of the image.
++     * @since api 13
++     */
++    int (*read_sector)(openpete_mod_t* self, uint32_t lba, uint8_t* buf);
+     /** @} */
+ } openpete_mod_api_t;
+ 
+diff --git a/core/mods/mod_loader.c b/core/mods/mod_loader.c
+index 6f5b2d8b..8afaf596 100644
+--- a/core/mods/mod_loader.c
++++ b/core/mods/mod_loader.c
+@@ -741,6 +741,27 @@ static const char* api_disc_path(openpete_mod_t* self, int want_bin) {
+     return s_disc_bin_state > 0 ? s_disc_bin : NULL;
+ }
+ 
++/** @brief Read one raw sector of the booted disc's sector image.
++ *
++ * Opens the image per call so the read is safe from any thread; mods read
++ * a handful of sectors, not a stream. A CD image is under 2 GiB, so a
++ * plain fseek reaches every sector on every host.
++ * @return 0, or -1 when there is no caller, disc or buffer, or the sector
++ *         lies past the end of the image. */
++static int api_read_sector(openpete_mod_t* self, uint32_t lba, uint8_t* buf) {
++    enum { SECTOR = 2352 };
++    if (!self || !buf) return -1;
++    const char* bin = api_disc_path(self, 1);
++    if (!bin) return -1;
++    if (lba > (uint32_t)(0x7FFFFFFF / SECTOR) - 1u) return -1;
++    FILE* f = fopen(bin, "rb");
++    if (!f) return -1;
++    int ok = fseek(f, (long)lba * SECTOR, SEEK_SET) == 0 &&
++             fread(buf, 1, SECTOR, f) == SECTOR;
++    fclose(f);
++    return ok ? 0 : -1;
++}
++
+ static int api_host_key_down(const char* key_name) {
+     if (!key_name) return 0;
+     SDL_Scancode sc = SDL_GetScancodeFromName(key_name);
+@@ -1735,8 +1756,9 @@ static const openpete_mod_api_t s_api = {
+     /* pillar 9: the host pads (api 12) */
+     .pad_read      = api_pad_read,
+     .pad_rumble    = api_pad_rumble,
+-    /* pillar 9: the booted disc (api 12) */
++    /* pillar 9: the booted disc (disc_path api 12, read_sector api 13) */
+     .disc_path     = api_disc_path,
++    .read_sector   = api_read_sector,
+     /* declared input bindings */
+     .binding_down  = api_binding_down,
+     /* pillar 9: game data + texture packs (api 2) */
+diff --git a/docs/modding/pages/code.md b/docs/modding/pages/code.md
+index 28bcf9f5..c0c506db 100644
+--- a/docs/modding/pages/code.md
++++ b/docs/modding/pages/code.md
+@@ -169,6 +169,7 @@ mod that wrote guest bytes restores the stock bytes on `on = 0`.
+ | Re-target texture-pack fog | `texpack_fog_shift` | No |
+ | Persistent files | `data_dir` | No |
+ | Find the booted disc image | `disc_path` (the path the engine opened, in any layout) | No |
++| Read a raw disc sector | `read_sector` (2352 bytes by LBA from the booted image) | No |
+ 
+ **`ui_status` or `notify`.** `ui_status` reports state: lines in the mod's
+ block of the Mods section, visible while that overlay is open, repainted
+-- 
+2.54.0 (Apple Git-157)
+
