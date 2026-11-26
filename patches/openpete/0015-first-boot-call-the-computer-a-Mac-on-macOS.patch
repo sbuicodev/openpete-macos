@@ -1,0 +1,80 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: Stefano Buico <stefano.buico@gmail.com>
+Date: Thu, 26 Nov 2026 12:01:52 +0100
+Subject: [PATCH] first boot: call the computer a Mac on macOS
+
+The splash and the module build progress said "THIS PC" / "YOUR PC";
+on macOS they say "MAC". Other platforms are unchanged.
+---
+ games/spyro-1/dist/recomp_build.cpp | 11 +++++++++--
+ games/spyro-1/dist/splash.c         | 11 +++++++++--
+ 2 files changed, 18 insertions(+), 4 deletions(-)
+
+diff --git a/games/spyro-1/dist/recomp_build.cpp b/games/spyro-1/dist/recomp_build.cpp
+index beb1a0f9..0d7ac9c7 100644
+--- a/games/spyro-1/dist/recomp_build.cpp
++++ b/games/spyro-1/dist/recomp_build.cpp
+@@ -32,6 +32,13 @@
+ #include <thread>
+ #include <vector>
+ 
++/* What the player's computer is called in on-screen text. */
++#ifdef __APPLE__
++#define SPLASH_HOST_NAME "MAC"
++#else
++#define SPLASH_HOST_NAME "PC"
++#endif
++
+ #ifdef _WIN32
+ #include <windows.h>
+ #else
+@@ -669,7 +676,7 @@ extern "C" int spyro1_recomp_build_module(const char* disc_path,
+         while (done.load() < tus.size() && !failed.load()) {
+             size_t d = done.load();
+             if (d != last) {
+-                progress("BUILDING FOR YOUR PC", (int)d, (int)tus.size());
++                progress("BUILDING FOR YOUR " SPLASH_HOST_NAME, (int)d, (int)tus.size());
+                 last = d;
+             }
+ #ifdef _WIN32
+@@ -679,7 +686,7 @@ extern "C" int spyro1_recomp_build_module(const char* disc_path,
+ #endif
+         }
+         for (auto& t : pool) t.join();
+-        progress("BUILDING FOR YOUR PC", (int)tus.size(), (int)tus.size());
++        progress("BUILDING FOR YOUR " SPLASH_HOST_NAME, (int)tus.size(), (int)tus.size());
+     }
+     if (failed.load()) return -1;
+ 
+diff --git a/games/spyro-1/dist/splash.c b/games/spyro-1/dist/splash.c
+index 441d4756..7d612df8 100644
+--- a/games/spyro-1/dist/splash.c
++++ b/games/spyro-1/dist/splash.c
+@@ -27,6 +27,13 @@
+ #include <stdlib.h>
+ #include <string.h>
+ 
++/* What the player's computer is called in on-screen text. */
++#ifdef __APPLE__
++#define SPLASH_HOST_NAME "MAC"
++#else
++#define SPLASH_HOST_NAME "PC"
++#endif
++
+ /* ---- tiny original 5x7 font (uppercase + digits + punctuation) ------- */
+ 
+ typedef struct { char ch; unsigned char rows[7]; } glyph_t;
+@@ -271,8 +278,8 @@ static void progress_render(const char* stage, int done, int total) {
+         SDL_RenderFillRect(s_ren, &fill);
+     }
+     draw_text_centered(292 + YOFF, 1,
+-        mods ? "CHANGED MOD SOURCES ARE COMPILED FOR THIS PC."
+-             : "YOUR DISC IS REBUILT FOR THIS PC. THIS HAPPENS ONCE.",
++        mods ? "CHANGED MOD SOURCES ARE COMPILED FOR THIS " SPLASH_HOST_NAME "."
++             : "YOUR DISC IS REBUILT FOR THIS " SPLASH_HOST_NAME ". THIS HAPPENS ONCE.",
+         150, 130, 190);
+     frame_end("progress");
+ }
+-- 
+2.54.0 (Apple Git-157)
+

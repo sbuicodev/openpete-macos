@@ -133,6 +133,7 @@ and commit the updated `patches/` and `overlay/` here.
 | 0012 | mods: compile code mods on macOS; build-time mod compile on; SDK in the `.app` |
 | 0013 | runtime: inside an `.app` keep the bundle's Dock icon (`SDL_SetWindowIcon` would replace it) |
 | 0014 | build: a shared-linkage (`.app`) build configures without recompiled output, so it needs no disc |
+| 0015 | first launch: on macOS the splash and build progress say "Mac", not "PC" |
 | psycross 0001 | arm64 primitive layout, `<stdlib.h>`, a half-float cast |
 
 Notes on the port:
