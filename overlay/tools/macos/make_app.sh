@@ -31,8 +31,11 @@ fi
 say() { printf '\033[1;32m==>\033[0m %s\n' "$*"; }
 die() { printf '\033[1;31merror:\033[0m %s\n' "$*" >&2; exit 1; }
 
+# A relative output path is relative to where the script was run from.
+OUT_ARG="${1:-}"
+[[ -z "$OUT_ARG" || "$OUT_ARG" == /* ]] || OUT_ARG="$PWD/$OUT_ARG"
 cd "$ROOT"
-APP="${1:-$ROOT/build/OpenPete.app}"
+APP="${OUT_ARG:-$ROOT/build/OpenPete.app}"
 [[ "$APP" == *.app ]] || die "output must end in .app: $APP"
 # shellcheck source=env.sh
 source tools/macos/env.sh

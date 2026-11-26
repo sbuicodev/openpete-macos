@@ -20,6 +20,9 @@ fi
 say() { printf '\033[1;32m==>\033[0m %s\n' "$*"; }
 die() { printf '\033[1;31merror:\033[0m %s\n' "$*" >&2; exit 1; }
 
+# A relative output path is relative to where the script was run from.
+OUT_ARG="${1:-}"
+[[ -z "$OUT_ARG" || "$OUT_ARG" == /* ]] || OUT_ARG="$PWD/$OUT_ARG"
 cd "$ROOT"
 IDENTITY="${OPENPETE_SIGN_IDENTITY:-}"
 PROFILE="${OPENPETE_NOTARY_PROFILE:-}"
@@ -34,7 +37,7 @@ tools/macos/make_app.sh "$STAGE/OpenPete.app"
 
 VERSION="$(/usr/libexec/PlistBuddy -c 'Print :CFBundleShortVersionString' \
     "$STAGE/OpenPete.app/Contents/Info.plist")"
-DMG="${1:-$ROOT/build/OpenPete-$VERSION.dmg}"
+DMG="${OUT_ARG:-$ROOT/build/OpenPete-$VERSION.dmg}"
 [[ "$DMG" == *.dmg ]] || die "output must end in .dmg: $DMG"
 mkdir -p "$(dirname "$DMG")"
 
