@@ -1,0 +1,113 @@
+# Build OpenPete-<tag>.dmg and publish it as a GitHub release whose notes are
+# that version's section of CHANGELOG.md.
+#
+# Release: move the [Unreleased] entries under "## [x.y.z] - date" in
+# CHANGELOG.md, commit, then `git tag vx.y.z && git push origin vx.y.z`.
+# Re-running for an existing release replaces its notes and DMG.
+#
+# Signing and notarization are optional: without the secrets below the DMG is
+# signed ad-hoc and players allow it once past Gatekeeper (see the README).
+#   MACOS_CERTIFICATE_P12       base64 of the Developer ID Application .p12
+#   MACOS_CERTIFICATE_PASSWORD  its export password
+#   MACOS_SIGN_IDENTITY         "Developer ID Application: Name (TEAMID)"
+#   NOTARY_API_KEY_P8           base64 of an App Store Connect API key (.p8)
+#   NOTARY_API_KEY_ID           that key's ID
+#   NOTARY_API_ISSUER           its issuer ID
+name: Release
+
+on:
+  push:
+    tags: ["v*"]
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: "Existing tag to (re)build, e.g. v0.1.0"
+        required: true
+
+permissions:
+  contents: write
+
+concurrency:
+  group: release-${{ github.event.inputs.tag || github.ref_name }}
+  cancel-in-progress: false
+
+jobs:
+  dmg:
+    runs-on: macos-15   # Apple Silicon
+    timeout-minutes: 90
+    env:
+      TAG: ${{ github.event.inputs.tag || github.ref_name }}
+      GH_TOKEN: ${{ github.token }}
+      HAS_CERT: ${{ secrets.MACOS_CERTIFICATE_P12 != '' }}
+      HAS_NOTARY_KEY: ${{ secrets.NOTARY_API_KEY_P8 != '' }}
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ github.event.inputs.tag || github.ref }}
+          fetch-depth: 0          # git describe names the version
+          submodules: false       # tools/setup.sh fetches what it needs
+
+      - name: Release notes from CHANGELOG.md
+        run: tools/release-notes.sh "$TAG" > "$RUNNER_TEMP/notes.md"
+
+      - name: Newest Xcode (layered icon needs Xcode 26+)
+        run: |
+          xc="$(ls -d /Applications/Xcode_*.app 2>/dev/null | sort -V | tail -1)"
+          if [[ -n "$xc" ]]; then sudo xcode-select -s "$xc/Contents/Developer"; fi
+          xcodebuild -version
+
+      - name: Bash 4 for the build scripts
+        run: brew install bash
+
+      - name: Import the signing certificate
+        if: env.HAS_CERT == 'true'
+        env:
+          CERT: ${{ secrets.MACOS_CERTIFICATE_P12 }}
+          CERT_PASSWORD: ${{ secrets.MACOS_CERTIFICATE_PASSWORD }}
+        run: |
+          KC="$RUNNER_TEMP/signing.keychain-db"
+          KC_PASS="$(uuidgen)"
+          printf '%s' "$CERT" | base64 --decode > "$RUNNER_TEMP/cert.p12"
+          security create-keychain -p "$KC_PASS" "$KC"
+          security set-keychain-settings -lut 21600 "$KC"
+          security unlock-keychain -p "$KC_PASS" "$KC"
+          security import "$RUNNER_TEMP/cert.p12" -k "$KC" -P "$CERT_PASSWORD" \
+              -T /usr/bin/codesign
+          security set-key-partition-list -S apple-tool:,apple: -s -k "$KC_PASS" "$KC"
+          security list-keychains -d user -s "$KC" $(security list-keychains -d user | tr -d '"')
+          rm "$RUNNER_TEMP/cert.p12"
+          echo "OPENPETE_SIGN_IDENTITY=${{ secrets.MACOS_SIGN_IDENTITY }}" >> "$GITHUB_ENV"
+
+      - name: Store notarization credentials
+        if: env.HAS_NOTARY_KEY == 'true' && env.OPENPETE_SIGN_IDENTITY != ''
+        env:
+          KEY: ${{ secrets.NOTARY_API_KEY_P8 }}
+          KEY_ID: ${{ secrets.NOTARY_API_KEY_ID }}
+          ISSUER: ${{ secrets.NOTARY_API_ISSUER }}
+        run: |
+          printf '%s' "$KEY" | base64 --decode > "$RUNNER_TEMP/notary.p8"
+          xcrun notarytool store-credentials openpete \
+              --key "$RUNNER_TEMP/notary.p8" --key-id "$KEY_ID" --issuer "$ISSUER"
+          rm "$RUNNER_TEMP/notary.p8"
+          echo "OPENPETE_NOTARY_PROFILE=openpete" >> "$GITHUB_ENV"
+
+      - name: Build the disk image
+        run: ./make-dmg.sh "build/OpenPete-$TAG.dmg"
+
+      - name: Publish the release
+        run: |
+          DMG="build/OpenPete-$TAG.dmg"
+          shasum -a 256 "$DMG" | sed 's| build/| |' > "$DMG.sha256"
+          if gh release view "$TAG" >/dev/null 2>&1; then
+            gh release edit "$TAG" --notes-file "$RUNNER_TEMP/notes.md"
+            gh release upload "$TAG" "$DMG" "$DMG.sha256" --clobber
+          else
+            gh release create "$TAG" "$DMG" "$DMG.sha256" \
+                --title "OpenPete for macOS $TAG" \
+                --notes-file "$RUNNER_TEMP/notes.md" \
+                --verify-tag
+          fi
+
+      - name: Remove the signing keychain
+        if: always() && env.HAS_CERT == 'true'
+        run: security delete-keychain "$RUNNER_TEMP/signing.keychain-db" || true

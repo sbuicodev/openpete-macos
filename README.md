@@ -117,6 +117,44 @@ loads the game module and code mods compiled on the player's Mac.
 `OPENPETE_SIGN_IDENTITY=-` signs ad-hoc with the hardened runtime, to test that
 setup without a certificate.
 
+### Publish a release
+
+GitHub Actions builds and publishes releases (`.github/workflows/release.yml`).
+Changes are recorded in [`CHANGELOG.md`](CHANGELOG.md), one `## [x.y.z]`
+section per version; that section becomes the release's Markdown notes.
+
+1. In `CHANGELOG.md`, rename `## [Unreleased]` to `## [x.y.z] - YYYY-MM-DD`,
+   start a new empty `## [Unreleased]` above it, and update the links at the
+   bottom.
+2. Commit, then tag and push:
+
+   ```bash
+   git tag v0.1.0 && git push origin v0.1.0
+   ```
+
+The workflow builds `OpenPete-vx.y.z.dmg` on an Apple Silicon runner, then
+creates the release with the changelog section (plus install and Gatekeeper
+pointers) as its notes, and attaches the DMG and its SHA-256. It stops before
+building if the changelog has no section for that version. To redo a release
+(say after fixing its notes), run the workflow by hand from the Actions tab
+with the tag; it replaces the notes and the DMG. `tools/release-notes.sh
+v0.1.0` prints the notes locally.
+
+Without secrets the DMG is signed ad-hoc. To publish signed, notarized DMGs,
+add these repository secrets (Settings → Secrets and variables → Actions):
+
+| Secret | Value |
+|---|---|
+| `MACOS_CERTIFICATE_P12` | your Developer ID Application certificate, exported as `.p12`, base64-encoded |
+| `MACOS_CERTIFICATE_PASSWORD` | that `.p12`'s export password |
+| `MACOS_SIGN_IDENTITY` | `Developer ID Application: Your Name (TEAMID)` |
+| `NOTARY_API_KEY_P8` | an App Store Connect API key (`.p8`), base64-encoded |
+| `NOTARY_API_KEY_ID` | that key's ID |
+| `NOTARY_API_ISSUER` | its issuer ID |
+
+GitHub Actions minutes are free for public repositories; on a private one,
+macOS minutes count against the plan at a higher rate than Linux.
+
 ### Build from the command line
 
 ```bash

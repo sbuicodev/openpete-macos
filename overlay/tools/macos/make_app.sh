@@ -131,7 +131,8 @@ else
     iconutil -c icns "$ICONSET" -o "$R/OpenPete.icns"
 fi
 
-VERSION="$(git describe --tags --always 2>/dev/null || echo dev)"
+# OPENPETE_VERSION: this repo's release (set by ./make-app.sh / ./make-dmg.sh).
+VERSION="${OPENPETE_VERSION:-$(git describe --tags --always 2>/dev/null || echo dev)}"
 cat > "$C/Info.plist" <<PLIST
 <?xml version="1.0" encoding="UTF-8"?>
 <!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
