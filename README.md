@@ -8,6 +8,14 @@ the commit the patches target.
 
 Rendering is Vulkan on Metal through MoltenVK. Intel Macs are not supported.
 
+> [!WARNING]
+> **This port was made with AI assistance.** The patches, scripts and
+> documentation were written largely by an AI coding assistant and have only
+> been tested on one Mac with one disc. It is an experiment, not a stable or
+> reliable release: expect bugs, crashes and breakage, and keep backups of your
+> save files. It is not reviewed or supported by the OpenPete authors; please
+> don't report problems with this port upstream.
+
 ## What you need
 
 - An Apple Silicon Mac, [Homebrew](https://brew.sh) and Git.
