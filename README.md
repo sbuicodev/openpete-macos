@@ -87,11 +87,57 @@ instead).
 ## Mods
 
 Mod API **13**, the same version upstream OpenPete uses now: mods written for
-upstream at API 13 or earlier load here. Code mods (`src/*.c`) are compiled on
-the Mac the first time they load, with Apple's Command Line Tools, against
-the mod SDK shipped in the app; asset-only mods need nothing. Put each mod in
-its own folder under `~/.local/share/openpete/mods/`. Mods that depend on
-engine features added upstream after the pinned commit may still not work.
+upstream at API 13 or earlier load here. Mods that depend on engine features
+added upstream after the pinned commit may still not work.
+
+### Where they go
+
+Mods live in `~/.local/share/openpete/mods/`, one folder per mod (or a
+`<id>.zip` with `mod.toml` at its root). Create the folder the first time:
+
+```bash
+mkdir -p ~/.local/share/openpete/mods
+```
+
+```bash
+open ~/.local/share/openpete/mods
+```
+
+`~/.local` is hidden in Finder; the `open` command above, or **Go → Go to
+Folder…** (⇧⌘G), gets you there. `--mods-dir DIR` or `OPENPETE_MODS_DIR`
+points the engine somewhere else.
+
+A code mod looks like this; an asset-only mod has no `src/`:
+
+```
+~/.local/share/openpete/mods/
+├── enabled.txt          optional: which mods load, and in what order
+└── my-mod/
+    ├── mod.toml         [mod] id = "my-mod", game = "spyro-1", api = 13, …
+    └── src/
+        └── my_mod.c
+```
+
+### How they load
+
+- **Code mods** (`src/*.c`) are compiled on the Mac the first time they load,
+  and again whenever their sources change, with Apple's Command Line Tools
+  against the mod SDK inside the app (`Contents/Resources/sdk`). The splash
+  shows "CHANGED MOD SOURCES ARE COMPILED FOR THIS MAC" while it does.
+  Asset-only mods need nothing.
+- **Which mods load:** without `enabled.txt`, every mod in the folder loads,
+  in alphabetical order. With it, only the IDs it lists load (one per line,
+  `#` starts a comment), and a mod listed later takes priority over earlier
+  ones.
+- **In game,** **M** opens the overlay whose Mods section turns a loaded mod
+  on or off and edits its settings.
+
+Mods are native code running inside the game with your user's privileges:
+there is no sandbox and no signing, so install only mods you trust.
+
+Upstream's example mods are in `work/openpete/mods/` (after `tools/setup.sh`),
+and its mod-author guides are in `work/openpete/docs/modding/pages/`
+(`getting-started.md`, `manifest.md`, `code.md`).
 
 ## How this repository works
 
