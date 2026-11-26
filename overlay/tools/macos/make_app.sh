@@ -7,8 +7,8 @@
 #
 #   tools/macos/make_app.sh [output.app]      (default: build/OpenPete.app)
 #
-# Prerequisite: tools/macos/build.sh has run once on this machine (it builds
-# PSXRecomp and the generated sources the CMake configure step requires).
+# No disc is needed here. If tools/macos/build.sh has not run yet, it is run
+# without a disc to set up the toolchain, PSXRecomp and the disc-free sources.
 # Nothing derived from the disc goes into the bundle: the engine is built with
 # shared recomp linkage, and only the recompile kit (function lists, the
 # module source kit, PSXRecomp) is staged.
@@ -24,10 +24,12 @@ die() { printf '\033[1;31merror:\033[0m %s\n' "$*" >&2; exit 1; }
 cd "$ROOT"
 APP="${1:-$ROOT/build/OpenPete.app}"
 [[ "$APP" == *.app ]] || die "output must end in .app: $APP"
-[[ -f games/spyro-1/generated/PSX.EXE_full.c ]] \
-    || die "run tools/macos/build.sh <disc.cue> once first"
-[[ -x third_party/psxrecomp/build/PSXRecomp ]] \
-    || die "PSXRecomp is not built; run tools/macos/build.sh first"
+if [[ ! -x third_party/psxrecomp/build/PSXRecomp \
+      || ! -f games/spyro-1/generated/psyq_stubs.c \
+      || ! -f games/spyro-1/generated/channel_sites.txt ]]; then
+    say "Preparing the toolchain (tools/macos/build.sh, no disc)"
+    tools/macos/build.sh
+fi
 
 # shellcheck source=env.sh
 source tools/macos/env.sh
@@ -75,15 +77,30 @@ cp third_party/imgui/LICENSE.txt "$R/licences/DearImGui-LICENSE.txt"
 cp third_party/dear_bindings/LICENSE.txt "$R/licences/dear_bindings-LICENSE.txt"
 
 say "Icon"
-ICONSET="$(mktemp -d)/OpenPete.iconset"
-mkdir -p "$ICONSET"
-python3 tools/gen_dist_icon.py --png "$ICONSET/base.png" --png-size 1024 >/dev/null
-for s in 16 32 128 256 512; do
-    sips -z $s $s "$ICONSET/base.png" --out "$ICONSET/icon_${s}x${s}.png" >/dev/null
-    sips -z $((s * 2)) $((s * 2)) "$ICONSET/base.png" --out "$ICONSET/icon_${s}x${s}@2x.png" >/dev/null
-done
-rm "$ICONSET/base.png"
-iconutil -c icns "$ICONSET" -o "$R/OpenPete.icns"
+# tools/macos/OpenPete.icon is the Icon Composer source. actool (full Xcode 26+)
+# compiles it to Assets.car (the layered icon) plus OpenPete.icns for older
+# macOS. With only the Command Line Tools, fall back to a flat .icns made from
+# the pixel-art mark.
+ICON_NAME_KEY=""
+if xcrun --find actool >/dev/null 2>&1 \
+    && xcrun actool tools/macos/OpenPete.icon --compile "$R" --app-icon OpenPete \
+        --platform macosx --minimum-deployment-target 13.0 \
+        --output-partial-info-plist "$(mktemp -d)/icon.plist" >/dev/null 2>&1 \
+    && [[ -f "$R/Assets.car" && -f "$R/OpenPete.icns" ]]; then
+    ICON_NAME_KEY="<key>CFBundleIconName</key>            <string>OpenPete</string>"
+else
+    say "actool unavailable (needs Xcode 26+); using the flat icon"
+    rm -f "$R/Assets.car"
+    ICONSET="$(mktemp -d)/OpenPete.iconset"
+    mkdir -p "$ICONSET"
+    python3 tools/gen_dist_icon.py --png "$ICONSET/base.png" --png-size 1024 >/dev/null
+    for s in 16 32 128 256 512; do
+        sips -z $s $s "$ICONSET/base.png" --out "$ICONSET/icon_${s}x${s}.png" >/dev/null
+        sips -z $((s * 2)) $((s * 2)) "$ICONSET/base.png" --out "$ICONSET/icon_${s}x${s}@2x.png" >/dev/null
+    done
+    rm "$ICONSET/base.png"
+    iconutil -c icns "$ICONSET" -o "$R/OpenPete.icns"
+fi
 
 VERSION="$(git describe --tags --always 2>/dev/null || echo dev)"
 cat > "$C/Info.plist" <<PLIST
@@ -96,6 +113,7 @@ cat > "$C/Info.plist" <<PLIST
     <key>CFBundleIdentifier</key>          <string>local.openpete.spyro1</string>
     <key>CFBundleExecutable</key>          <string>$EXE</string>
     <key>CFBundleIconFile</key>            <string>OpenPete</string>
+    $ICON_NAME_KEY
     <key>CFBundlePackageType</key>         <string>APPL</string>
     <key>CFBundleShortVersionString</key>  <string>${VERSION#v}</string>
     <key>CFBundleVersion</key>             <string>${VERSION#v}</string>

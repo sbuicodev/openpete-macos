@@ -2,8 +2,12 @@
 # One-shot build of OpenPete (Spyro the Dragon) for Apple Silicon macOS.
 #
 #   tools/macos/build.sh "/path/to/Spyro the Dragon (USA).cue"
+#   tools/macos/build.sh             (no disc: prepare for make_app.sh only)
 #
 # Needs Homebrew and the user's own NTSC-U disc image (SCUS-94228, .cue+.bin).
+# Without a disc it sets up the toolchain, builds PSXRecomp and writes the
+# disc-free generated sources, which is all tools/macos/make_app.sh needs: the
+# .app asks for the disc on first launch.
 # No Docker, no PSYQ SDK, no decompilation build: PSX.EXE and the overlays are
 # carved from the disc and verified against the decomp's sha256sum.txt, then
 # recompiled to C and built with the macos-arm64 preset (full recompiled
@@ -23,8 +27,7 @@ say()  { printf '\033[1;32m==>\033[0m %s\n' "$*"; }
 die()  { printf '\033[1;31merror:\033[0m %s\n' "$*" >&2; exit 1; }
 
 DISC="${1:-}"
-[[ -n "$DISC" ]] || die "usage: tools/macos/build.sh /path/to/disc.cue"
-[[ -f "$DISC" ]] || die "disc image not found: $DISC"
+[[ -z "$DISC" || -f "$DISC" ]] || die "disc image not found: $DISC"
 [[ "$(uname -s)" == Darwin && "$(uname -m)" == arm64 ]] || die "Apple Silicon macOS only"
 command -v brew >/dev/null || die "Homebrew is required: https://brew.sh"
 
@@ -49,13 +52,27 @@ git submodule update --init --recursive -- \
 # shellcheck source=env.sh
 source tools/macos/env.sh
 
-say "Carving PSX.EXE and overlays from the disc"
-python3 tools/macos/carve_disc.py "$DISC"
-
 say "Building the PSXRecomp recompiler"
 cmake -S third_party/psxrecomp/recompiler -B third_party/psxrecomp/build -G Ninja \
       -DCMAKE_BUILD_TYPE=Release -DCMAKE_CXX_FLAGS=-DFMT_CONSTEVAL= >/dev/null
 cmake --build third_party/psxrecomp/build
+
+if [[ -z "$DISC" ]]; then
+    # The two generated files the engine itself compiles or ships; both come
+    # from manifests in the repo, not from the disc.
+    say "Generating the disc-free sources"
+    mkdir -p games/spyro-1/generated
+    python3 tools/gen_psyq_stubs.py --prefix psyq_ \
+        games/spyro-1/manifest/psyq.toml games/spyro-1/generated/psyq_stubs.c >/dev/null
+    python3 tools/gen_channel_sites.py \
+        --manifest games/spyro-1/manifest/render_channels.toml \
+        --out games/spyro-1/generated/channel_sites.txt
+    say "Done. No disc given: build the app with tools/macos/make_app.sh"
+    exit 0
+fi
+
+say "Carving PSX.EXE and overlays from the disc"
+python3 tools/macos/carve_disc.py "$DISC"
 
 say "Recompiling the game to C (about a minute)"
 mkdir -p build

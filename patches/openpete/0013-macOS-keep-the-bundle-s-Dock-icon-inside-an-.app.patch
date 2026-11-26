@@ -1,0 +1,59 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: Stefano Buico <stefano.buico@gmail.com>
+Date: Thu, 26 Nov 2026 01:44:57 +0100
+Subject: [PATCH] macOS: keep the bundle's Dock icon inside an .app
+
+SDL_SetWindowIcon replaces the Dock icon on macOS, so the runtime pixel-art
+icon hid the Icon Composer icon compiled into Assets.car. Inside an .app both
+the PsyCross window icon and the native window handoff are skipped; builds run
+outside a bundle still get the generated icon.
+---
+ core/runtime/run.c | 18 +++++++++++++++---
+ 1 file changed, 15 insertions(+), 3 deletions(-)
+
+diff --git a/core/runtime/run.c b/core/runtime/run.c
+index 1556ea82..cb533091 100644
+--- a/core/runtime/run.c
++++ b/core/runtime/run.c
+@@ -57,6 +57,7 @@
+ #include "music_override.h"
+ #include "openpete_memcard.h"
+ #include "openpete_handoff.h"
++#include "openpete_paths.h"
+ 
+ #include "PsyX/PsyX_public.h"  /* g_PsyX_Pad_InputOverride */
+ 
+@@ -2208,8 +2209,19 @@ static int run_host_init(const openpete_options_t* opts) {
+      * RGBA8 plus its dimensions. The Win32 .rc resource handles taskbar /
+      * .exe shortcut / alt-tab on Windows; SDL_SetWindowIcon covers the
+      * live window on every platform. Weakly referenced so a build that
+-     * opts out of the icon generator step still links. */
+-    if (g_window) {
++     * opts out of the icon generator step still links.
++     *
++     * On macOS SDL_SetWindowIcon replaces the Dock icon, so inside an .app
++     * it is skipped and the bundle's own icon (Assets.car) stays. */
++    int bundle_icon = 0;
++#ifdef __APPLE__
++    {
++        char exe[4096];
++        bundle_icon = openpete_exe_path(exe, sizeof exe) == 0
++                   && strstr(exe, ".app/Contents/MacOS/") != NULL;
++    }
++#endif
++    if (g_window && !bundle_icon) {
+         extern const uint8_t openpete_game_icon_rgba[]
+             __attribute__((weak));
+         extern const int openpete_game_icon_w __attribute__((weak));
+@@ -2229,7 +2241,7 @@ static int run_host_init(const openpete_options_t* opts) {
+     /* Same icon for the native Vulkan window, which is the visible one in the
+      * default path (PsyCross runs null-GPU and creates no window at all).
+      * Handed over rather than applied: that window does not exist yet. */
+-    {
++    if (!bundle_icon) {
+         extern const uint8_t openpete_game_icon_rgba[] __attribute__((weak));
+         extern const int openpete_game_icon_w __attribute__((weak));
+         extern const int openpete_game_icon_h __attribute__((weak));
+-- 
+2.54.0 (Apple Git-157)
+

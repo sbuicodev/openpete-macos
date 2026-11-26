@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 # Make OpenPete.app (no game code inside; it recompiles the player's disc on
-# first launch). Needs ./build.sh to have run once.
+# first launch). Needs no disc; sets up the toolchain itself if needed.
 #   ./make-app.sh [output.app]      (default: build/OpenPete.app)
 set -euo pipefail
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"

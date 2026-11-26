@@ -1,0 +1,69 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: Stefano Buico <stefano.buico@gmail.com>
+Date: Thu, 26 Nov 2026 11:17:53 +0100
+Subject: [PATCH] build: shared-linkage exe configures without recompiled
+ output
+
+The distribution exe carries no game code and compiles the module from the
+player's disc at first boot, so it does not need generated/ from a disc.
+Without PSX.EXE_full.c a shared-linkage configure now skips only the module
+target (a dev artifact there) instead of the whole game.
+---
+ cmake/openpete_game.cmake | 27 ++++++++++++++++++++-------
+ 1 file changed, 20 insertions(+), 7 deletions(-)
+
+diff --git a/cmake/openpete_game.cmake b/cmake/openpete_game.cmake
+index a2daf5f4..b43dc4cf 100644
+--- a/cmake/openpete_game.cmake
++++ b/cmake/openpete_game.cmake
+@@ -69,13 +69,6 @@ function(openpete_add_game GAME_ID)
+     set(_generated ${CMAKE_CURRENT_SOURCE_DIR}/generated)
+     set(_gen_dir ${CMAKE_CURRENT_BINARY_DIR}/gen)
+ 
+-    if(NOT EXISTS ${_generated}/PSX.EXE_full.c)
+-        message(WARNING
+-            "${GAME_ID}: no recompiled output in generated/ — run "
+-            "`GAME=${GAME_ID} bash scripts/regen-recomp.sh` first. Skipping target.")
+-        return()
+-    endif()
+-
+     if(NOT G_MAIN)
+         set(G_MAIN ${_common}/game_main.cpp)
+     endif()
+@@ -104,6 +97,25 @@ function(openpete_add_game GAME_ID)
+         set(G_MODULE_LINKAGE static)
+     endif()
+ 
++    # Without recompiled output a shared-linkage build still makes the exe:
++    # it carries no game code and compiles the module from the player's disc
++    # at first boot. Only the module target (a dev artifact there) is skipped.
++    set(_with_module ON)
++    if(NOT EXISTS ${_generated}/PSX.EXE_full.c)
++        if(G_MODULE_LINKAGE STREQUAL "shared")
++            message(STATUS
++                "${GAME_ID}: no recompiled output in generated/ — building the "
++                "exe without ${_module} (compiled at first boot).")
++            set(_with_module OFF)
++        else()
++            message(WARNING
++                "${GAME_ID}: no recompiled output in generated/ — run "
++                "`GAME=${GAME_ID} bash scripts/regen-recomp.sh` first. Skipping target.")
++            return()
++        endif()
++    endif()
++
++    if(_with_module)
+     # CONFIGURE_DEPENDS re-runs the GLOB so newly regenerated overlays are
+     # picked up without a manual reconfigure.
+     file(GLOB _overlay_full_c     CONFIGURE_DEPENDS "${_generated}/*/*.bin_full.c")
+@@ -172,6 +184,7 @@ function(openpete_add_game GAME_ID)
+         ${_overlay_full_c}
+         ${_overlay_dispatch_c}
+         PROPERTIES COMPILE_FLAGS "-w")
++    endif()
+ 
+     # Identity: the game_extras.h identity accessors and the address-only
+     # PSYQ hooks, from recomp.conf.
+-- 
+2.54.0 (Apple Git-157)
+

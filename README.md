@@ -20,41 +20,26 @@ Rendering is Vulkan on Metal through MoltenVK. Intel Macs are not supported.
 
 - An Apple Silicon Mac, [Homebrew](https://brew.sh) and Git.
 - Your own disc image of **Spyro the Dragon, NTSC-U (SCUS-94228)** as a
-  `.cue` + `.bin` pair. Other regions and the Spyro 2 / 3 discs do not work;
-  the build checks the disc and stops if it is the wrong one.
+  `.cue` + `.bin` pair, to play. Other regions and the Spyro 2 / 3 discs do
+  not work; the disc is checked and refused if it is the wrong one. No build
+  step needs it: the app asks for it on first launch, and `build.sh` takes it
+  only if you give it.
 
 No PSYQ SDK, Docker or MIPS toolchain is needed.
-
-## Build and play
 
 ```bash
 git clone --recursive https://github.com/sbuicodev/openpete-macos.git
 cd openpete-macos
-./build.sh "/path/to/Spyro the Dragon (USA).cue"
 ```
 
-`build.sh` runs `tools/setup.sh` (below), then:
-
-1. installs the Homebrew packages it needs (CMake, Ninja, glslang,
-   SPIRV-Tools, OpenAL Soft, MoltenVK, Python, GNU bash/sed/grep/find/awk);
-2. carves `PSX.EXE` and the 37 code overlays from your disc and checks them
-   against the decompilation's `sha256sum.txt`;
-3. builds the PSXRecomp recompiler, translates the game's MIPS code to C and
-   builds the game.
-
-It prints the command to run the game. Everything derived from your disc stays
-under `work/` (gitignored).
-
-Default keys: arrow keys or a gamepad to move, **C** jump, **X** charge,
-**V** flame, **Z** look, **Return** start, **O** settings menu, **F7** pause,
-**Alt+Enter** fullscreen, **Escape** quit (the app below opens the menu
-instead).
-
-## Make a double-clickable app
+## Make the app
 
 ```bash
 ./make-app.sh            # -> build/OpenPete.app (about 19 MB)
 ```
+
+On a fresh clone this first runs `./build.sh` without a disc (below) to set up
+the toolchain, then builds the app.
 
 The app contains **no game code or data**: just the engine, MoltenVK, OpenAL
 Soft, the recompile kit (PSXRecomp, per-overlay function-address lists, a
@@ -73,6 +58,31 @@ Settings save to `~/.config/openpete/openpete.toml`; memory cards and logs
 live in `~/.local/state/openpete/`. The app is ad-hoc signed, not notarized:
 on another Mac, the first launch of a downloaded copy needs right-click →
 **Open** (or allow it under System Settings → Privacy & Security).
+
+## Build from the command line
+
+```bash
+./build.sh                                          # toolchain only
+./build.sh "/path/to/Spyro the Dragon (USA).cue"    # and the game itself
+```
+
+`build.sh` runs `tools/setup.sh` (below), installs the Homebrew packages it
+needs (CMake, Ninja, glslang, SPIRV-Tools, OpenAL Soft, MoltenVK, Python, GNU
+bash/sed/grep/find/awk) and builds the PSXRecomp recompiler.
+
+- **Without a disc** it stops there, after writing the two generated sources
+  that come from the repo's manifests. That is everything `./make-app.sh`
+  needs.
+- **With a disc** it goes on to carve `PSX.EXE` and the 37 code overlays from
+  it, check them against the decompilation's `sha256sum.txt`, translate the
+  game's MIPS code to C and build a standalone game binary (the developer
+  build: no app bundle, game code linked in). It prints the command to run
+  it. Everything derived from your disc stays under `work/` (gitignored).
+
+Default keys: arrow keys or a gamepad to move, **C** jump, **X** charge,
+**V** flame, **Z** look, **Return** start, **O** settings menu, **F7** pause,
+**Alt+Enter** fullscreen, **Escape** quit (in the app, Escape opens the menu
+instead).
 
 ## Mods
 
@@ -121,6 +131,8 @@ and commit the updated `patches/` and `overlay/` here.
 | 0010 | mods: `disc_path` (upstream, API 12) |
 | 0011 | mods: `read_sector`, API 13 (upstream's call, implemented without upstream's disc-reader rework) |
 | 0012 | mods: compile code mods on macOS; build-time mod compile on; SDK in the `.app` |
+| 0013 | runtime: inside an `.app` keep the bundle's Dock icon (`SDL_SetWindowIcon` would replace it) |
+| 0014 | build: a shared-linkage (`.app`) build configures without recompiled output, so it needs no disc |
 | psycross 0001 | arm64 primitive layout, `<stdlib.h>`, a half-float cast |
 
 Notes on the port:
