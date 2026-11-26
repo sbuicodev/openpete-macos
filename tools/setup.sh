@@ -58,9 +58,9 @@ ID=()
 git config user.email >/dev/null 2>&1 || ID=(-c user.name=openpete-macos -c user.email=openpete-macos@localhost)
 
 say "Applying patches"
-git -C "$W" ${ID[@]+"${ID[@]}"} am --quiet "$ROOT"/patches/openpete/*.patch
+git -C "$W" ${ID[@]+"${ID[@]}"} am --quiet --keep-cr "$ROOT"/patches/openpete/*.patch
 git -C "$W/third_party/PsyCross" checkout --quiet -b arm64-fixes
-git -C "$W/third_party/PsyCross" ${ID[@]+"${ID[@]}"} am --quiet "$ROOT"/patches/psycross/*.patch
+git -C "$W/third_party/PsyCross" ${ID[@]+"${ID[@]}"} am --quiet --keep-cr "$ROOT"/patches/psycross/*.patch
 
 say "Copying overlay files"
 cp -R "$ROOT/overlay/." "$W/"
